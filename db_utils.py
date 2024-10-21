@@ -31,6 +31,12 @@ def get_schema_info(engine):
         inspector = inspect(engine)
         schema_info = {}
 
+        # Define PII columns (you can add or modify based on your requirements)
+        pii_columns = {
+            "kyc": ["name", "email", "pan", "aadhaar", "phone_number"],
+            "credit_card": ["creditcard_number", "cvv"],
+        }
+
         # Fetch all tables from the database
         tables = inspector.get_table_names()
 
@@ -39,8 +45,13 @@ def get_schema_info(engine):
             schema_info[table] = []
             columns = inspector.get_columns(table)
             for column in columns:
+                is_pii = column["name"] in pii_columns.get(table, [])
                 schema_info[table].append(
-                    {"name": column["name"], "type": str(column["type"])}
+                    {
+                        "name": column["name"],
+                        "type": str(column["type"]),
+                        "is_pii": is_pii,  
+                    }
                 )
         return schema_info
     except Exception as e:
