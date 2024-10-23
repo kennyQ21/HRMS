@@ -3,7 +3,7 @@ from sqlalchemy import create_engine, inspect
 
 def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=None):
     try:
-        if db_type == "postgresql":
+        if db_type == "postgres":
             url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
         elif db_type == "mysql":
             url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{db_name}"
@@ -26,15 +26,28 @@ def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=No
         return {"error": f"Error connecting to the database: {e}"}
 
 
+
 def get_schema_info(engine):
     try:
         inspector = inspect(engine)
         schema_info = {}
 
-        # Define PII columns (you can add or modify based on your requirements)
+        # Define PII columns with their sensitivity levels
         pii_columns = {
-            "kyc": ["name", "email", "pan", "aadhaar", "phone_number"],
-            "credit_card": ["creditcard_number", "cvv"],
+            "kyc": {
+                "name": {"sensitivity_level": "medium"},
+                "email": {"sensitivity_level": "high"},
+                "pan": {"sensitivity_level": "high"},
+                "aadhaar": {"sensitivity_level": "high"},
+                "phone_number": {"sensitivity_level": "medium"},
+            },
+            "credit_card": {
+                "creditcard_number": {"sensitivity_level": "high"},
+                "cvv": {"sensitivity_level": "high"},
+                "expiry": {"sensitivity_level": "medium"},
+                "issue_date": {"sensitivity_level": "medium"},
+                "kyc_id": {"sensitivity_level": "low"},
+            },
         }
 
         # Fetch all tables from the database
@@ -45,12 +58,18 @@ def get_schema_info(engine):
             schema_info[table] = []
             columns = inspector.get_columns(table)
             for column in columns:
-                is_pii = column["name"] in pii_columns.get(table, [])
+                is_pii = column["name"] in pii_columns.get(table, {})
+                sensitivity_level = (
+                    pii_columns[table][column["name"]]["sensitivity_level"] if is_pii else None
+                )
+                
                 schema_info[table].append(
                     {
                         "name": column["name"],
                         "type": str(column["type"]),
-                        "is_pii": is_pii,  
+                        "is_pii": is_pii,
+                        "sensitivity_level": sensitivity_level,
+                        "confidence": 0.9,  # Fixed confidence value
                     }
                 )
         return schema_info
