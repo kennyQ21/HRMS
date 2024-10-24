@@ -3,7 +3,6 @@ import os
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
-
 from db_utils import connect_to_db, get_schema_info
 
 app = Flask(__name__)
