@@ -18,7 +18,7 @@ RUN apt-get update \
 
 COPY pyproject.toml poetry.lock* ./
 
-RUN poetry install --no-root
+RUN poetry install --no-root && pip install flask-cors
 
 COPY . ./
 
