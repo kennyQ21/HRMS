@@ -16,11 +16,11 @@ RUN apt-get update \
 
 
 
-COPY pyproject.toml poetry.lock* ./app/
+COPY pyproject.toml poetry.lock* ./
 
 RUN poetry install --no-root
 
-COPY . /app
+COPY . ./
 
 EXPOSE 5000
 
