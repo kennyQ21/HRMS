@@ -2,17 +2,21 @@ import os
 
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
+from flask_cors import CORS
 
 from db_utils import connect_to_db, get_schema_info
 
 app = Flask(__name__)
+CORS(app)
 app.config["DEBUG"] = os.getenv("FLASK_ENV") == "development"
 
-
-@app.route("/get-schema", methods=["POST"])
+@app.route("/get-schema", methods=["POST", "OPTIONS"])  
 def get_schema():
-    data = request.json
+    if request.method == "OPTIONS":
+        # CORS preflight request, just return OK (200)
+        return '', 200
 
+    data = request.json
     db_type = data.get("db_type")
     db_name = data.get("db_name")
     user = data.get("user")
