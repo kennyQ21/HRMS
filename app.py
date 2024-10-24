@@ -2,12 +2,13 @@ import os
 
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
-
+from flask_cors import CORS
 from db_utils import connect_to_db, get_schema_info
 
 app = Flask(__name__)
 app.config["DEBUG"] = os.getenv("FLASK_ENV") == "development"
 
+CORS(app, resources={r"/*": {"origins": "*"}}) 
 
 @app.route("/get-schema", methods=["POST"])
 def get_schema():
