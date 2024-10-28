@@ -1,8 +1,9 @@
 from sqlalchemy import create_engine, inspect
-
+from sqlalchemy.exc import OperationalError
 
 def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=None):
     try:
+        # Build the connection URL
         if db_type == "postgres":
             url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
         elif db_type == "mysql":
@@ -14,14 +15,20 @@ def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=No
         elif db_type == "oracle":
             url = f"oracle+cx_oracle://{user}:{password}@{host}:{port}/?service_name={db_name}"
         elif db_type == "mariadb":
-            url = (
-                f"mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{db_name}"
-            )
+            url = f"mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{db_name}"
         else:
             raise ValueError(f"Unsupported database type: {db_type}")
 
         engine = create_engine(url)
+
+        # Attempt to connect to the database by opening and closing the connection
+        with engine.connect() as connection:
+            pass  # Successful connection
+
         return engine
+    except OperationalError as e:
+        # Database connection error
+        return {"error": f"Error connecting to the database: {e}"}
     except Exception as e:
         return {"error": f"Error connecting to the database: {e}"}
 
