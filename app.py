@@ -149,7 +149,7 @@ def get_table_data():
         ingestion_response = requests.post(ingestion_url, json={"data": serialized_data}, headers=headers)
 
         # Check if the ingestion request was successful
-        if ingestion_response.status_code != 200:
+        if ingestion_response.status_code != 201:
             return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 500
 
         return jsonify({"table": table_name, "data": serialized_data, "ingestion_status": ingestion_response.json()})
