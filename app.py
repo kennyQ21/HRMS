@@ -8,6 +8,7 @@ from sqlalchemy import select
 import requests
 import time
 from datetime import date, datetime
+from sqlalchemy.exc import SQLAlchemyError
 
 
 
@@ -238,6 +239,100 @@ def benchmark_get_table_data():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/ingest-table-data", methods=["POST", "OPTIONS"])
+def ingest_table_data():
+    if request.method == "OPTIONS":
+        # CORS preflight request, just return OK (200)
+        return '', 200
+
+    data = request.json
+    db_type = data.get("db_type")
+    db_name = data.get("db_name")
+    user = data.get("user")
+    password = data.get("password")
+    host = data.get("host", "localhost")
+    port = data.get("port", None)
+    tables_info = data.get("tables_info", [])
+
+    # Get the join key common to all tables, defaulting to 'id'
+    # join_key = data.get("join_key", "id")
+    join_key = "id"
+
+    if not db_type or not db_name or not tables_info:
+        return jsonify({"error": "Missing database type, database name, or table information"}), 400
+
+    engine = connect_to_db(db_type, db_name, user, password, host, port)
+    if isinstance(engine, dict) and "error" in engine:
+        return jsonify(engine), 500
+
+    try:
+        metadata = MetaData()
+        metadata.reflect(bind=engine)
+
+        # Initialize the query with the first table's selected columns
+        base_table_info = tables_info[0]
+        base_table = metadata.tables.get(base_table_info["table_name"])
+
+        if base_table is None:
+            return jsonify({"error": f"Table '{base_table_info['table_name']}' not found"}), 404
+
+        # Select only the specified columns for the base table
+        base_columns = [
+            base_table.c[col] for col in base_table_info["columns"]
+            if col in base_table.c
+        ] if base_table_info.get("columns") else [base_table]
+
+        # Ensure we have columns to select
+        if not base_columns:
+            return jsonify({"error": f"No valid columns specified for table '{base_table_info['table_name']}'"}), 400
+
+        query = select(*base_columns).select_from(base_table)
+
+        # Join subsequent tables based on the common join key
+        for table_info in tables_info[1:]:
+            table = metadata.tables.get(table_info["table_name"])
+            if table is None:
+                return jsonify({"error": f"Table '{table_info['table_name']}' not found"}), 404
+
+            # Select only the specified columns for the current table
+            columns = [table.c[col] for col in table_info["columns"] if col in table.c] if table_info.get("columns") else [table]
+
+            # Ensure we have columns to select for the current table
+            if not columns:
+                return jsonify({"error": f"No valid columns specified for table '{table_info['table_name']}'"}), 400
+
+            query = query.add_columns(*columns).join(
+                table,
+                base_table.c[join_key] == table.c[join_key]
+            )
+
+        # Execute the query
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+        # Extract raw data and serialize
+        # Convert rows to a list of dicts using the _mapping property
+        serialized_data = serialize_data([dict(row._mapping) for row in rows])  # Convert rows to a list of dicts
+
+        # Send the serialized data to the ingestion URL
+        ingestion_url = f"https://policyengine.getpatronus.com/api/vault/vaults/{data['vault_name']}/records/multiple"
+        headers = {
+            "Authorization": f"Bearer {request.headers.get('Authorization').split()[1]}",
+            "Content-Type": "application/json"
+        }
+        ingestion_response = requests.post(ingestion_url, json={"data": serialized_data}, headers=headers)
+
+        # Check if the ingestion request was successful
+        if ingestion_response.status_code != 201:
+            return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 500
+
+        return jsonify({"ingestion_status": ingestion_response.json()})
+
+    except SQLAlchemyError as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 
