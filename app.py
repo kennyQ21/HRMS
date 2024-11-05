@@ -1,5 +1,4 @@
 import os
-
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
@@ -9,7 +8,7 @@ import requests
 import time
 from datetime import date, datetime
 from sqlalchemy.exc import SQLAlchemyError
-
+import uuid
 
 
 app = Flask(__name__)
@@ -74,15 +73,18 @@ def get_schema():
 
 
 def serialize_data(data):
-    """Recursively convert dates to strings in the data."""
+    """Recursively convert dates and UUIDs to strings in the data."""
     if isinstance(data, dict):
         return {key: serialize_data(value) for key, value in data.items()}
     elif isinstance(data, list):
         return [serialize_data(item) for item in data]
     elif isinstance(data, (date, datetime)):
         return data.isoformat()  # Convert date/datetime to ISO 8601 string
+    elif isinstance(data, uuid.UUID):
+        return str(data)  # Convert UUID to string
     else:
         return data
+
 
 @app.route("/get-table-data", methods=["POST"])
 def get_table_data():
@@ -240,6 +242,7 @@ def benchmark_get_table_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @app.route("/ingest-table-data", methods=["POST", "OPTIONS"])
 def ingest_table_data():
     if request.method == "OPTIONS":
@@ -254,17 +257,16 @@ def ingest_table_data():
     host = data.get("host", "localhost")
     port = data.get("port", None)
     tables_info = data.get("tables_info", [])
+    join_key = data.get("join_key", "id")
 
-    # Get the join key common to all tables, defaulting to 'id'
-    # join_key = data.get("join_key", "id")
-    join_key = "id"
-
+    # Basic validation
     if not db_type or not db_name or not tables_info:
         return jsonify({"error": "Missing database type, database name, or table information"}), 400
 
+    # Database connection
     engine = connect_to_db(db_type, db_name, user, password, host, port)
     if isinstance(engine, dict) and "error" in engine:
-        return jsonify(engine), 500
+        return jsonify(engine), 422
 
     try:
         metadata = MetaData()
@@ -283,56 +285,73 @@ def ingest_table_data():
             if col in base_table.c
         ] if base_table_info.get("columns") else [base_table]
 
-        # Ensure we have columns to select
         if not base_columns:
             return jsonify({"error": f"No valid columns specified for table '{base_table_info['table_name']}'"}), 400
 
         query = select(*base_columns).select_from(base_table)
 
-        # Join subsequent tables based on the common join key
+        # Outer join subsequent tables based on the common join key
         for table_info in tables_info[1:]:
             table = metadata.tables.get(table_info["table_name"])
             if table is None:
                 return jsonify({"error": f"Table '{table_info['table_name']}' not found"}), 404
 
-            # Select only the specified columns for the current table
             columns = [table.c[col] for col in table_info["columns"] if col in table.c] if table_info.get("columns") else [table]
 
-            # Ensure we have columns to select for the current table
             if not columns:
                 return jsonify({"error": f"No valid columns specified for table '{table_info['table_name']}'"}), 400
 
-            query = query.add_columns(*columns).join(
-                table,
-                base_table.c[join_key] == table.c[join_key]
-            )
+            # Check if the join key exists in the current table
+            if join_key in table.c:
+                query = query.add_columns(*columns).outerjoin(
+                    table,
+                    base_table.c[join_key] == table.c[join_key]
+                )
+            else:
+                query = query.add_columns(*columns)
 
         # Execute the query
         with engine.connect() as conn:
             result = conn.execute(query)
             rows = result.fetchall()
 
-        # Extract raw data and serialize
-        # Convert rows to a list of dicts using the _mapping property
-        serialized_data = serialize_data([dict(row._mapping) for row in rows])  # Convert rows to a list of dicts
+        # Serialize and deduplicate data based on the join key
+        unique_data = {}
+        for row in rows:
+            row_dict = {key: serialize_data(value) for key, value in row._mapping.items()} 
+            join_key_value = row_dict.get(join_key)
+            # Store only unique join_key entries, keeping the last occurrence
+            if join_key_value is not None:
+                unique_data[join_key_value] = serialize_data(row_dict) 
 
-        # Send the serialized data to the ingestion URL
+        # Convert the unique entries to a list for batching
+        serialized_data = list(unique_data.values())
+        columns_count = len(serialized_data[0].keys())
+        max_batch_size = 65535 // columns_count
+
+        # Prepare to send serialized data in batches
         ingestion_url = f"https://policyengine.getpatronus.com/api/vault/vaults/{data['vault_name']}/records/multiple"
         headers = {
             "Authorization": f"Bearer {request.headers.get('Authorization').split()[1]}",
             "Content-Type": "application/json"
         }
-        ingestion_response = requests.post(ingestion_url, json={"data": serialized_data}, headers=headers)
 
-        # Check if the ingestion request was successful
-        if ingestion_response.status_code != 201:
-            return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 500
+        # Batch the serialized data for ingestion
+        for i in range(0, len(serialized_data), max_batch_size):
+            batch_data = serialized_data[i:i + max_batch_size]
+            ingestion_response = requests.post(ingestion_url, json={"data": batch_data}, headers=headers)
 
-        return jsonify({"ingestion_status": ingestion_response.json()})
+            # Handle ingestion response for each batch
+            if ingestion_response.status_code != 201:
+                return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 422
+
+        return jsonify({"ingestion_status": "All batches ingested successfully"})
 
     except SQLAlchemyError as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Database error", "details": str(e)}), 422
 
+    except Exception as e:
+        return jsonify({"error": "Unexpected error", "details": str(e)}), 400
 
 
 
