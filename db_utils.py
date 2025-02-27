@@ -1,11 +1,21 @@
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import OperationalError
 import re
+from pymongo import MongoClient
 
 def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=None):
     try:
-        # Build the connection URL
-        if db_type == "postgres":
+        if db_type.startswith("mongodb"):
+            if db_type == "mongodb_standard":
+                url = f"mongodb://{user}:{password}@{host}:{port}/{db_name}"
+            elif db_type == "mongodb_srv":
+                url = f"mongodb+srv://{user}:{password}@{host}/{db_name}"
+            client = MongoClient(url)
+            client.server_info()
+            return client[db_name]
+        
+        # Build the connection URL for SQL databases
+        elif db_type == "postgres":
             url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
         elif db_type == "mysql":
             url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{db_name}"
@@ -37,9 +47,8 @@ def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=No
 
 def get_schema_info(engine):
     """
-    Retrieves schema information from the database and annotates each column with PII details
-    based on its name. It uses both an exact-match dictionary and regex rules to determine if a
-    column contains PII and assigns an appropriate sensitivity level.
+    Retrieves schema information from the database and annotates each column with PII details.
+    Now supports both SQL databases and MongoDB.
 
     The merged PII definitions include:
       - General PII (e.g., name, email)
@@ -52,9 +61,6 @@ def get_schema_info(engine):
         dict: Mapping of table names to a list of column info dictionaries.
     """
     try:
-        inspector = inspect(engine)
-        schema_info = {}
-
         # Single merged dictionary for exact PII definitions (keys are in lowercase)
         pii_columns = {
             # General PII definitions
@@ -93,6 +99,54 @@ def get_schema_info(engine):
             (re.compile(r'issue[\s_]*date', re.IGNORECASE), "medium"),
             (re.compile(r'kyc[_]?id', re.IGNORECASE), "low"),
         ]
+
+        
+        # Check if the engine is a MongoDB database
+        if isinstance(engine, type(MongoClient()['test'])):
+            schema_info = {}
+            # Get all collections in the database
+            collections = engine.list_collection_names()
+            
+            for collection in collections:
+                schema_info[collection] = []
+                # Get a sample document to infer schema
+                sample = engine[collection].find_one()
+                if sample:
+                    for field_name, value in sample.items():
+                        # Skip MongoDB's internal _id field
+                        if field_name == '_id':
+                            continue
+                            
+                        # Determine field type
+                        field_type = type(value).__name__
+                        
+                        # Check for PII using existing logic
+                        normalized_field_name = field_name.strip().lower()
+                        pii_info = None
+                        
+                        if normalized_field_name in pii_columns:
+                            pii_info = pii_columns[normalized_field_name]
+                        else:
+                            for pattern, sensitivity in regex_pii_rules:
+                                if pattern.search(field_name):
+                                    pii_info = {"sensitivity_level": sensitivity}
+                                    break
+                                    
+                        is_pii = pii_info is not None
+                        sensitivity_level = pii_info["sensitivity_level"] if is_pii else None
+                        
+                        schema_info[collection].append({
+                            "name": field_name,
+                            "type": field_type,
+                            "is_pii": is_pii,
+                            "sensitivity_level": sensitivity_level,
+                            "confidence": 0.9,
+                        })
+            return schema_info
+            
+        # For SQL databases, use existing logic
+        inspector = inspect(engine)
+        schema_info = {}
 
         # Fetch all table names from the database
         tables = inspector.get_table_names()

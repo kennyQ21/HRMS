@@ -9,6 +9,7 @@ import time
 from datetime import date, datetime
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
+from bson.objectid import ObjectId
 
 
 app = Flask(__name__)
@@ -96,7 +97,7 @@ def get_table_data():
     password = data.get("password")
     host = data.get("host", "localhost")
     port = data.get("port", None)
-    table_name = data.get("table_name")
+    table_name = data.get("table_name")  # For MongoDB, this will be collection name
     selected_columns = data.get("selected_columns", [])
     vault_name = data.get("vault_name")
 
@@ -111,34 +112,59 @@ def get_table_data():
     if not db_type or not db_name or not table_name or not vault_name:
         return jsonify({"error": "Missing database type, database name, table name, or vault name"}), 400
 
+    # Connect to database
     engine = connect_to_db(db_type, db_name, user, password, host, port)
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
 
     try:
-        metadata = MetaData()
-        metadata.reflect(bind=engine)
+        # Handle MongoDB differently from SQL databases
+        if db_type.startswith("mongodb"):
+            # For MongoDB, engine is actually the database object
+            collection = engine[table_name]
+            
+            # Build projection for selected columns
+            projection = None
+            if selected_columns:
+                projection = {col: 1 for col in selected_columns}
+                # Always include _id unless explicitly excluded
+                if "_id" not in selected_columns:
+                    projection["_id"] = 0
 
-        table = metadata.tables.get(table_name)
-        if table is None:
-            return jsonify({"error": f"Table '{table_name}' not found"}), 404
+            # Fetch documents
+            cursor = collection.find({}, projection)
+            table_data = list(cursor)
 
-        conn = engine.connect()
+            # Convert MongoDB ObjectId to string if present
+            for doc in table_data:
+                if "_id" in doc and isinstance(doc["_id"], ObjectId):
+                    doc["_id"] = str(doc["_id"])
 
-        # Create the query with selected columns
-        if selected_columns:
-            query = select(*[table.c[column] for column in selected_columns])
         else:
-            query = select(table)  # Select all columns if none specified
+            # Existing SQL database logic
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
 
-        result = conn.execute(query)
-        rows = result.fetchall()
+            table = metadata.tables.get(table_name)
+            if table is None:
+                return jsonify({"error": f"Table '{table_name}' not found"}), 404
 
-        # Convert rows to a list of dictionaries
-        column_names = selected_columns if selected_columns else table.columns.keys()
-        table_data = [dict(zip(column_names, row)) for row in rows]
+            conn = engine.connect()
 
-        conn.close()
+            # Create the query with selected columns
+            if selected_columns:
+                query = select(*[table.c[column] for column in selected_columns])
+            else:
+                query = select(table)  # Select all columns if none specified
+
+            result = conn.execute(query)
+            rows = result.fetchall()
+
+            # Convert rows to a list of dictionaries
+            column_names = selected_columns if selected_columns else table.columns.keys()
+            table_data = [dict(zip(column_names, row)) for row in rows]
+
+            conn.close()
 
         # Serialize data to handle date and datetime objects
         serialized_data = serialize_data(table_data)
@@ -155,7 +181,11 @@ def get_table_data():
         if ingestion_response.status_code != 201:
             return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 500
 
-        return jsonify({"table": table_name, "data": serialized_data, "ingestion_status": ingestion_response.json()})
+        return jsonify({
+            "table": table_name,
+            "data": serialized_data,
+            "ingestion_status": ingestion_response.json()
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
