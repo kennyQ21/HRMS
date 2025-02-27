@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import OperationalError
+import re
 
 def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=None):
     try:
@@ -35,50 +36,99 @@ def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=No
 
 
 def get_schema_info(engine):
+    """
+    Retrieves schema information from the database and annotates each column with PII details
+    based on its name. It uses both an exact-match dictionary and regex rules to determine if a
+    column contains PII and assigns an appropriate sensitivity level.
+
+    The merged PII definitions include:
+      - General PII (e.g., name, email)
+      - India-specific PII (e.g., pan, aadhaar)
+      - Table-specific PII (e.g., phone_number, creditcard_number)
+
+    Regex rules catch variations in column naming such as 'email_address', 'mobile', 'date_of_birth', etc.
+
+    Returns:
+        dict: Mapping of table names to a list of column info dictionaries.
+    """
     try:
         inspector = inspect(engine)
         schema_info = {}
 
-        # Define PII columns with their sensitivity levels
+        # Single merged dictionary for exact PII definitions (keys are in lowercase)
         pii_columns = {
-            "kyc": {
-                "name": {"sensitivity_level": "medium"},
-                "email": {"sensitivity_level": "high"},
-                "pan": {"sensitivity_level": "high"},
-                "aadhaar": {"sensitivity_level": "high"},
-                "phone_number": {"sensitivity_level": "medium"},
-            },
-            "credit_card": {
-                "creditcard_number": {"sensitivity_level": "high"},
-                "cvv": {"sensitivity_level": "high"},
-                "expiry": {"sensitivity_level": "medium"},
-                "issue_date": {"sensitivity_level": "medium"},
-                "kyc_id": {"sensitivity_level": "low"},
-            },
+            # General PII definitions
+            "name": {"sensitivity_level": "low"},
+            "email": {"sensitivity_level": "high"},
+            "phone": {"sensitivity_level": "medium"},
+            "address": {"sensitivity_level": "medium"},
+            "dob": {"sensitivity_level": "medium"},
+            # India-specific PII definitions
+            "pan": {"sensitivity_level": "high"},
+            "aadhaar": {"sensitivity_level": "high"},
+            "voter_id": {"sensitivity_level": "medium"},
+            # Table-specific PII definitions (assuming column names are unique across tables)
+            "phone_number": {"sensitivity_level": "medium"},
+            "creditcard_number": {"sensitivity_level": "high"},
+            "cvv": {"sensitivity_level": "high"},
+            "expiry": {"sensitivity_level": "medium"},
+            "issue_date": {"sensitivity_level": "medium"},
+            "kyc_id": {"sensitivity_level": "low"},
         }
 
-        # Fetch all tables from the database
+        # Define regex patterns to catch variations in column names.
+        # Each tuple contains a compiled regex and the associated sensitivity level.
+        regex_pii_rules = [
+            (re.compile(r'email', re.IGNORECASE), "high"),
+            (re.compile(r'phone|mobile', re.IGNORECASE), "medium"),
+            (re.compile(r'address', re.IGNORECASE), "medium"),
+            (re.compile(r'\bname\b', re.IGNORECASE), "low"),
+            (re.compile(r'dob|date_of_birth', re.IGNORECASE), "medium"),
+            (re.compile(r'pan', re.IGNORECASE), "high"),
+            (re.compile(r'aadhaar', re.IGNORECASE), "high"),
+            (re.compile(r'voter[_\s]?id', re.IGNORECASE), "medium"),
+            (re.compile(r'credit[\s_]*card|creditcard', re.IGNORECASE), "high"),
+            (re.compile(r'cvv', re.IGNORECASE), "high"),
+            (re.compile(r'expiry', re.IGNORECASE), "medium"),
+            (re.compile(r'issue[\s_]*date', re.IGNORECASE), "medium"),
+            (re.compile(r'kyc[_]?id', re.IGNORECASE), "low"),
+        ]
+
+        # Fetch all table names from the database
         tables = inspector.get_table_names()
 
-        # Retrieve columns for each table
+        # Process each table's columns
         for table in tables:
             schema_info[table] = []
             columns = inspector.get_columns(table)
             for column in columns:
-                is_pii = column["name"] in pii_columns.get(table, {})
-                sensitivity_level = (
-                    pii_columns[table][column["name"]]["sensitivity_level"] if is_pii else None
-                )
-                
-                schema_info[table].append(
-                    {
-                        "name": column["name"],
-                        "type": str(column["type"]),
-                        "is_pii": is_pii,
-                        "sensitivity_level": sensitivity_level,
-                        "confidence": 0.9,  # Fixed confidence value
-                    }
-                )
+                col_name = column["name"]
+                pii_info = None
+
+                # Normalize column name for exact matching (lowercase and stripped)
+                normalized_col_name = col_name.strip().lower()
+
+                # Check for an exact match in the merged dictionary first
+                if normalized_col_name in pii_columns:
+                    pii_info = pii_columns[normalized_col_name]
+                else:
+                    # If no exact match, apply regex rules to catch variations
+                    for pattern, sensitivity in regex_pii_rules:
+                        if pattern.search(col_name):
+                            pii_info = {"sensitivity_level": sensitivity}
+                            break
+
+                is_pii = pii_info is not None
+                sensitivity_level = pii_info["sensitivity_level"] if is_pii else None
+
+                schema_info[table].append({
+                    "name": col_name,
+                    "type": str(column["type"]),
+                    "is_pii": is_pii,
+                    "sensitivity_level": sensitivity_level,
+                    "confidence": 0.9,  # Fixed confidence value
+                })
         return schema_info
+
     except Exception as e:
         return {"error": f"Error retrieving schema information: {e}"}
