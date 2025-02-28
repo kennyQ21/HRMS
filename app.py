@@ -2,7 +2,7 @@ import os
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
-from db_utils import connect_to_db, scan_columns_for_pii_sql
+from db_utils import connect_to_db, scan_columns_for_pii_sql, scan_columns_for_pii_mongo
 from sqlalchemy import select, text
 import requests
 import time
@@ -71,6 +71,8 @@ def get_schema():
         return jsonify(engine), 500
     if db_type=="postgres":
         schema_info = scan_columns_for_pii_sql(engine,scan_type)
+    elif db_type.startswith("mongodb"):
+        schema_info = scan_columns_for_pii_mongo(engine,scan_type)
     return jsonify(schema_info)
 
 
