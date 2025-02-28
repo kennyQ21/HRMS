@@ -2,8 +2,8 @@ import os
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
-from db_utils import connect_to_db, get_schema_info
-from sqlalchemy import select
+from db_utils import connect_to_db, scan_columns_for_pii
+from sqlalchemy import select, text
 import requests
 import time
 from datetime import date, datetime
@@ -59,6 +59,7 @@ def get_schema():
     password = data.get("password")
     host = data.get("host", "localhost")
     port = data.get("port", None)
+    scan_type = data.get("scan_type", "metadata")
 
     if not db_type or not db_name:
         return jsonify({"error": "Missing database type or database name"}), 400
@@ -68,7 +69,7 @@ def get_schema():
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
 
-    schema_info = get_schema_info(engine)
+    schema_info = scan_columns_for_pii(engine,scan_type)
     return jsonify(schema_info)
 
 
