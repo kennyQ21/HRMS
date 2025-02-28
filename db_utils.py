@@ -1,11 +1,21 @@
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 import re
+from pymongo import MongoClient
 
 def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=None):
     try:
-        # Build the connection URL
-        if db_type == "postgres":
+        if db_type.startswith("mongodb"):
+            if db_type == "mongodb_standard":
+                url = f"mongodb://{user}:{password}@{host}:{port}/{db_name}"
+            elif db_type == "mongodb_srv":
+                url = f"mongodb+srv://{user}:{password}@{host}/{db_name}"
+            client = MongoClient(url)
+            client.server_info()
+            return client[db_name]
+        
+        # Build the connection URL for SQL databases
+        elif db_type == "postgres":
             url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
         elif db_type == "mysql":
             url = f"mysql+pymysql://{user}:{password}@{host}:{port}/{db_name}"
