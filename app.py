@@ -2,7 +2,7 @@ import os
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
-from db_utils import connect_to_db, scan_columns_for_pii
+from db_utils import connect_to_db, scan_columns_for_pii_sql
 from sqlalchemy import select, text
 import requests
 import time
@@ -70,8 +70,7 @@ def get_schema():
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
     if db_type=="postgres":
-        schema_info = scan_columns_for_pii(engine,scan_type)
-    schema_info = scan_columns_for_pii(engine,scan_type)
+        schema_info = scan_columns_for_pii_sql(engine,scan_type)
     return jsonify(schema_info)
 
 
