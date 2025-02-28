@@ -82,7 +82,7 @@ data_pii_rules = [
     (re.compile(r'\d+\s+\w+(\s+\w+)*\s+(Street|St|Avenue|Ave|Road|Rd)\b', re.IGNORECASE), "address", "medium")
 ]
 
-def scan_columns_for_pii(engine, mode="dual"):
+def scan_columns_for_pii_sql(engine, mode="dual"):
     """
     Scans each table's columns using one of two approaches:
       - "metadata": Only scans the column names using regex rules.

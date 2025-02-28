@@ -69,7 +69,8 @@ def get_schema():
     engine = connect_to_db(db_type, db_name, user, password, host, port)
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
-
+    if db_type=="postgres":
+        schema_info = scan_columns_for_pii(engine,scan_type)
     schema_info = scan_columns_for_pii(engine,scan_type)
     return jsonify(schema_info)
 
