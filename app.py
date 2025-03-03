@@ -279,7 +279,6 @@ def benchmark_get_table_data():
 @app.route("/ingest-table-data", methods=["POST", "OPTIONS"])
 def ingest_table_data():
     if request.method == "OPTIONS":
-        # CORS preflight request, just return OK (200)
         return '', 200
 
     data = request.json
@@ -292,96 +291,128 @@ def ingest_table_data():
     tables_info = data.get("tables_info", [])
     join_key = data.get("join_key", "id")
 
-    # Basic validation
     if not db_type or not db_name or not tables_info:
         return jsonify({"error": "Missing database type, database name, or table information"}), 400
 
-    # Database connection
     engine = connect_to_db(db_type, db_name, user, password, host, port)
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 422
 
     try:
-        metadata = MetaData()
-        metadata.reflect(bind=engine)
+        if db_type.startswith("mongodb"):
+            # MongoDB logic
+            base_collection_info = tables_info[0]
+            base_collection = engine[base_collection_info["table_name"]]
+            
+            # Create projection from requested columns
+            base_projection = {col: 1 for col in base_collection_info.get("columns", [])} if base_collection_info.get("columns") else None
+            if base_projection and join_key not in base_projection:
+                base_projection[join_key] = 1
 
-        # Initialize the query with the first table's selected columns
-        base_table_info = tables_info[0]
-        base_table = metadata.tables.get(base_table_info["table_name"])
+            # Get base documents
+            base_docs = list(base_collection.find({}, base_projection))
+            
+            # Create a lookup dictionary for documents by join key
+            merged_data = {str(doc.get(join_key)): doc for doc in base_docs if join_key in doc}
 
-        if base_table is None:
-            return jsonify({"error": f"Table '{base_table_info['table_name']}' not found"}), 404
+            # Merge data from additional collections
+            for collection_info in tables_info[1:]:
+                collection = engine[collection_info["table_name"]]
+                projection = {col: 1 for col in collection_info.get("columns", [])} if collection_info.get("columns") else None
+                if projection:
+                    projection[join_key] = 1
 
-        # Select only the specified columns for the base table
-        base_columns = [
-            base_table.c[col] for col in base_table_info["columns"]
-            if col in base_table.c
-        ] if base_table_info.get("columns") else [base_table]
+                # Get documents from current collection
+                docs = collection.find({}, projection)
+                
+                # Merge documents based on join key
+                for doc in docs:
+                    doc_join_key = str(doc.get(join_key))
+                    if doc_join_key in merged_data:
+                        merged_data[doc_join_key].update({k: v for k, v in doc.items() if k != join_key})
 
-        if not base_columns:
-            return jsonify({"error": f"No valid columns specified for table '{base_table_info['table_name']}'"}), 400
+            # Convert merged data to list and handle ObjectId serialization
+            serialized_data = []
+            for doc in merged_data.values():
+                serialized_doc = {}
+                for k, v in doc.items():
+                    if isinstance(v, ObjectId):
+                        serialized_doc[k] = str(v)
+                    else:
+                        serialized_doc[k] = v
+                serialized_data.append(serialized_doc)
 
-        query = select(*base_columns).select_from(base_table)
+        else:
+            # SQL logic
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
+            
+            base_table_info = tables_info[0]
+            base_table = metadata.tables.get(base_table_info["table_name"])
 
-        # Outer join subsequent tables based on the common join key
-        for table_info in tables_info[1:]:
-            table = metadata.tables.get(table_info["table_name"])
-            if table is None:
-                return jsonify({"error": f"Table '{table_info['table_name']}' not found"}), 404
+            if base_table is None:
+                return jsonify({"error": f"Table '{base_table_info['table_name']}' not found"}), 404
 
-            columns = [table.c[col] for col in table_info["columns"] if col in table.c] if table_info.get("columns") else [table]
+            base_columns = [
+                base_table.c[col] for col in base_table_info["columns"]
+                if col in base_table.c
+            ] if base_table_info.get("columns") else [base_table]
 
-            if not columns:
-                return jsonify({"error": f"No valid columns specified for table '{table_info['table_name']}'"}), 400
+            if not base_columns:
+                return jsonify({"error": f"No valid columns specified for table '{base_table_info['table_name']}'"}), 400
 
-            # Check if the join key exists in the current table
-            if join_key in table.c:
-                query = query.add_columns(*columns).outerjoin(
-                    table,
-                    base_table.c[join_key] == table.c[join_key]
-                )
-            else:
-                query = query.add_columns(*columns)
+            query = select(*base_columns).select_from(base_table)
 
-        # Execute the query
-        with engine.connect() as conn:
-            result = conn.execute(query)
-            rows = result.fetchall()
+            for table_info in tables_info[1:]:
+                table = metadata.tables.get(table_info["table_name"])
+                if table is None:
+                    return jsonify({"error": f"Table '{table_info['table_name']}' not found"}), 404
 
-        # Serialize and deduplicate data based on the join key
-        unique_data = {}
-        for row in rows:
-            row_dict = {key: serialize_data(value) for key, value in row._mapping.items()} 
-            join_key_value = row_dict.get(join_key)
-            # Store only unique join_key entries, keeping the last occurrence
-            if join_key_value is not None:
-                unique_data[join_key_value] = serialize_data(row_dict) 
+                columns = [table.c[col] for col in table_info["columns"] if col in table.c] if table_info.get("columns") else [table]
 
-        # Convert the unique entries to a list for batching
-        serialized_data = list(unique_data.values())
-        columns_count = len(serialized_data[0].keys())
-        max_batch_size = 65535 // columns_count
+                if not columns:
+                    return jsonify({"error": f"No valid columns specified for table '{table_info['table_name']}'"}), 400
 
-        # Prepare to send serialized data in batches
+                if join_key in table.c:
+                    query = query.add_columns(*columns).outerjoin(
+                        table,
+                        base_table.c[join_key] == table.c[join_key]
+                    )
+                else:
+                    query = query.add_columns(*columns)
+
+            with engine.connect() as conn:
+                result = conn.execute(query)
+                rows = result.fetchall()
+
+            unique_data = {}
+            for row in rows:
+                row_dict = {key: serialize_data(value) for key, value in row._mapping.items()}
+                join_key_value = row_dict.get(join_key)
+                if join_key_value is not None:
+                    row_dict['_id'] = str(join_key_value)  # Use join_key as _id for SQL data
+                    unique_data[join_key_value] = serialize_data(row_dict)
+
+            serialized_data = list(unique_data.values())
+
+        # Common ingestion logic
+        columns_count = len(serialized_data[0].keys()) if serialized_data else 0
+        max_batch_size = 65535 // max(columns_count, 1)
+
         ingestion_url = f"https://policyengine.getpatronus.com/api/vault/vaults/{data['vault_name']}/records/multiple"
         headers = {
             "Authorization": f"Bearer {request.headers.get('Authorization').split()[1]}",
             "Content-Type": "application/json"
         }
 
-        # Batch the serialized data for ingestion
         for i in range(0, len(serialized_data), max_batch_size):
             batch_data = serialized_data[i:i + max_batch_size]
             ingestion_response = requests.post(ingestion_url, json={"data": batch_data}, headers=headers)
 
-            # Handle ingestion response for each batch
             if ingestion_response.status_code != 201:
                 return jsonify({"error": "Failed to ingest data", "details": ingestion_response.text}), 422
 
         return jsonify({"ingestion_status": "All batches ingested successfully"})
-
-    except SQLAlchemyError as e:
-        return jsonify({"error": "Database error", "details": str(e)}), 422
 
     except Exception as e:
         return jsonify({"error": "Unexpected error", "details": str(e)}), 400
