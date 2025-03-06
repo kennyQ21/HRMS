@@ -3,18 +3,26 @@ from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
 from db_utils import connect_to_db, scan_columns_for_pii_sql, scan_columns_for_pii_mongo
-from sqlalchemy import select, text
+from sqlalchemy import select
 import requests
 import time
 from datetime import date, datetime
-from sqlalchemy.exc import SQLAlchemyError
 import uuid
 from bson.objectid import ObjectId
+from constants import PII_TYPES, PIIType
+from sqlalchemy.orm import sessionmaker
+from models import ColumnScan, ScanAnomaly, engine
+import re
+from typing import List, Tuple
+from collections import defaultdict
+
 
 
 app = Flask(__name__)
 CORS(app)
 app.config["DEBUG"] = os.getenv("FLASK_ENV") == "development"
+
+Session = sessionmaker(bind=engine)
 
 
 @app.route("/check-connection", methods=["POST", "OPTIONS"])
@@ -417,6 +425,231 @@ def ingest_table_data():
     except Exception as e:
         return jsonify({"error": "Unexpected error", "details": str(e)}), 400
 
+
+@app.route("/get-pii-types", methods=["GET", "OPTIONS"])
+def get_pii_types():
+    """
+    Get all PII types and their metadata.
+    Returns a JSON array of PII type definitions.
+    """
+    if request.method == "OPTIONS":
+        # CORS preflight request, just return OK (200)
+        return '', 200
+    
+    # Convert Enum values to strings for JSON serialization
+    serialized_pii_types = []
+    for pii_type in PII_TYPES:
+        serialized_type = {
+            'id': pii_type['id'],
+            'name': pii_type['name'],
+            'description': pii_type['description'],
+            'category': pii_type['category'].value,
+            'sensitivity': pii_type['sensitivity'].value
+        }
+        serialized_pii_types.append(serialized_type)
+    
+    return jsonify(serialized_pii_types)
+
+
+def check_pii_matches(value: str, pii_types: List[PIIType]) -> List[Tuple[str, bool]]:
+    """Check a value against all PII regex patterns."""
+    matches = []
+    for pii_type in pii_types:
+        if 'regex' in pii_type:
+            try:
+                pattern = re.compile(pii_type['regex'])
+                matches.append((pii_type['id'], bool(pattern.match(str(value)))))
+            except:
+                continue
+    return matches
+
+
+@app.route("/scan-database", methods=["POST"])
+def scan_database():
+    """Scan database for PII and store results."""
+    data = request.json
+    db_type = data.get("db_type")
+    db_name = data.get("db_name")
+    user = data.get("user")
+    password = data.get("password")
+    host = data.get("host", "localhost")
+    port = data.get("port", None)
+    connector_id = data.get("connector_id")
+    pii_ids = data.get("pii_ids", [])
+
+    if not all([db_type, db_name, connector_id]):
+        return jsonify({"error": "Missing required parameters"}), 400
+
+    # Filter PII_TYPES based on provided pii_ids
+    selected_pii_types = [pii for pii in PII_TYPES if pii['id'] in pii_ids] if pii_ids else PII_TYPES
+
+    # Connect to the target database
+    engine = connect_to_db(db_type, db_name, user, password, host, port)
+    if isinstance(engine, dict) and "error" in engine:
+        return jsonify(engine), 500
+
+    session = Session()
+
+    try:
+        # First, delete existing scans for this connector_id
+        existing_scans = session.query(ColumnScan).filter(ColumnScan.connector_id == connector_id).all()
+        for scan in existing_scans:
+            session.delete(scan)
+        session.commit()
+
+        scan_results = []  # To collect results
+
+        if db_type.startswith("mongodb"):
+            # MongoDB scanning logic
+            collections = engine.list_collection_names()
+            for collection_name in collections:
+                collection = engine[collection_name]
+                sample_docs = list(collection.find().limit(1000))
+                
+                fields = set()
+                for doc in sample_docs:
+                    fields.update(doc.keys())
+
+                for field in fields:
+                    field_values = [doc.get(field) for doc in sample_docs if field in doc]
+                    result = process_column_data(session, connector_id, db_name, collection_name, field, field_values, selected_pii_types)
+                    scan_results.append(result)
+
+        else:
+            # SQL database scanning logic
+            metadata = MetaData()
+            metadata.reflect(bind=engine)
+
+            for table_name, table in metadata.tables.items():
+                query = select(table).limit(1000)
+                with engine.connect() as conn:
+                    result = conn.execute(query)
+                    rows = [dict(row._mapping) for row in result]
+                    
+                    for column in table.columns:
+                        column_values = [row.get(column.name) for row in rows]
+                        result = process_column_data(session, connector_id, db_name, table_name, column.name, column_values, selected_pii_types)
+                        scan_results.append(result)
+
+        session.commit()
+        return jsonify({
+            "message": "Scan completed successfully",
+        })
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
+
+def process_column_data(session, connector_id: str, db_name: str, table_name: str, column_name: str, values: List[any], pii_types: List[PIIType]):
+    """Process and store column data scanning results."""
+    try:
+        pii_matches = defaultdict(int)
+        total_rows = len(values)
+        
+        # Count matches for each PII type
+        for value in values:
+            if value is not None:
+                matches = check_pii_matches(str(value), pii_types)
+                for pii_id, matched in matches:
+                    if matched:
+                        pii_matches[pii_id] += 1
+
+        # Find primary PII type (highest match count)
+        primary_pii = (None, 0)
+        for pii_id, match_count in pii_matches.items():
+            if match_count / total_rows > 0.5:  # More than 50% match rate
+                if match_count > primary_pii[1]:
+                    primary_pii = (pii_id, match_count)
+        
+        # Create column scan record
+        column_scan = ColumnScan(
+            connector_id=connector_id,
+            db_name=db_name,
+            table_name=table_name,
+            column_name=column_name,
+            total_rows=total_rows,
+            primary_pii_type=primary_pii[0],
+            primary_pii_match_count=primary_pii[1]
+        )
+        
+        session.add(column_scan)
+        session.flush()  # This will populate the id field
+        
+
+        for pii_id, match_count in pii_matches.items():
+            if pii_id != primary_pii[0] and match_count > 0:
+                confidence_score = match_count / total_rows
+                anomaly = ScanAnomaly(
+                    column_scan_id=column_scan.id,
+                    pii_type=pii_id,
+                    match_count=match_count,
+                    confidence_score=confidence_score
+                )
+                session.add(anomaly)
+        
+    except Exception as e:
+        print(f"Error processing column {column_name}: {str(e)}")
+        raise
+
+@app.route("/get-scan-results/<connector_id>", methods=["GET", "OPTIONS"])
+def get_scan_results(connector_id):
+    """Get the scanning results and anomalies for a specific connector."""
+    if request.method == "OPTIONS":
+        # CORS preflight request, just return OK (200)
+        return '', 200
+
+    session = Session()
+    try:
+        scans = session.query(ColumnScan).filter(ColumnScan.connector_id == connector_id).all()
+        
+        if not scans:
+            return jsonify({"error": "No scan results found for this connector"}), 404
+        
+        results = []
+        pii_type_totals = defaultdict(int)  # Track totals for each PII type
+        
+        for scan in scans:
+            # Add primary PII matches to totals
+            if scan.primary_pii_type and scan.primary_pii_match_count:
+                pii_type_totals[scan.primary_pii_type] += scan.primary_pii_match_count
+            
+            # Add anomaly matches to totals
+            for anomaly in scan.anomalies:
+                pii_type_totals[anomaly.pii_type] += anomaly.match_count
+            
+            scan_data = {
+                "db_name": scan.db_name,
+                "table_name": scan.table_name,
+                "column_name": scan.column_name,
+                "scan_date": scan.scan_date.isoformat(),
+                "total_rows": scan.total_rows,
+                "primary_pii_type": scan.primary_pii_type,
+                "primary_pii_match_count": scan.primary_pii_match_count,
+                "anomalies": [
+                    {
+                        "pii_type": anomaly.pii_type,
+                        "match_count": anomaly.match_count,
+                        "confidence_score": anomaly.confidence_score
+                    }
+                    for anomaly in scan.anomalies
+                ]
+            }
+            results.append(scan_data)
+        
+        # Convert defaultdict to regular dict for JSON serialization
+        pii_totals = dict(pii_type_totals)
+        
+        return jsonify({
+            "pii_type_totals": pii_totals,  # Total matches for each PII type
+            "scan_results": results
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":
