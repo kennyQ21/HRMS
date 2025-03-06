@@ -26,7 +26,7 @@ def connect_to_db(db_type, db_name, user=None, password=None, host=None, port=No
         elif db_type == "mssql":
             url = f"mssql+pymssql://{user}:{password}@{host}:{port}/{db_name}"
         elif db_type == "oracle":
-            url = f"oracle+cx_oracle://{user}:{password}@{host}:{port}/?service_name={db_name}"
+            url = f"oracle+oracledb://{user}:{password}@{host}:{port}/?service_name={db_name}"
         elif db_type == "mariadb":
             url = (
                 f"mariadb+mariadbconnector://{user}:{password}@{host}:{port}/{db_name}"

@@ -77,7 +77,7 @@ def get_schema():
     engine = connect_to_db(db_type, db_name, user, password, host, port)
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
-    if db_type=="postgres":
+    if db_type=="postgres" or db_type==("oracle"):
         schema_info = scan_columns_for_pii_sql(engine,scan_type)
     elif db_type.startswith("mongodb"):
         schema_info = scan_columns_for_pii_mongo(engine,scan_type)
