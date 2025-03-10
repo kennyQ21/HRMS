@@ -558,6 +558,9 @@ def process_column_data(session, scan : Scan, connector_id: str, db_name: str, t
         pii_matches = defaultdict(int)
         total_rows = len(values)
         
+        # Initialize primary_pii with default values
+        primary_pii = (None, 0)  # (pii_id, match_count)
+        
         # Count matches for each PII type
         for value in values:
             if value is not None:
