@@ -11,7 +11,7 @@ import uuid
 from bson.objectid import ObjectId
 from constants import PII_TYPES, PIIType
 from sqlalchemy.orm import sessionmaker
-from models import ColumnScan, ScanAnomaly, engine
+from models import ColumnScan, ScanAnomaly, Scan, engine
 import re
 from typing import List, Tuple
 from collections import defaultdict
@@ -476,6 +476,7 @@ def scan_database():
     port = data.get("port", None)
     connector_id = data.get("connector_id")
     pii_ids = data.get("pii_ids", [])
+    scan_name = data.get("scan_name")
 
     if not all([db_type, db_name, connector_id]):
         return jsonify({"error": "Missing required parameters"}), 400
@@ -491,11 +492,19 @@ def scan_database():
     session = Session()
 
     try:
-        # First, delete existing scans for this connector_id
-        existing_scans = session.query(ColumnScan).filter(ColumnScan.connector_id == connector_id).all()
-        for scan in existing_scans:
-            session.delete(scan)
+          # Delete old scans with the same connector_id
+        old_scans = session.query(Scan).filter(Scan.connector_id == connector_id).all()
+        for old_scan in old_scans:
+            session.delete(old_scan)
         session.commit()
+
+           # Create a new scan record
+        scan = Scan(
+            name=scan_name,
+            connector_id=connector_id
+        )
+        session.add(scan)
+        session.flush()  # Get scan.id
 
         scan_results = []  # To collect results
 
@@ -528,12 +537,13 @@ def scan_database():
                     
                     for column in table.columns:
                         column_values = [row.get(column.name) for row in rows]
-                        result = process_column_data(session, connector_id, db_name, table_name, column.name, column_values, selected_pii_types)
+                        result = process_column_data(session, scan, connector_id, db_name, table_name, column.name, column_values, selected_pii_types)
                         scan_results.append(result)
 
         session.commit()
         return jsonify({
             "message": "Scan completed successfully",
+            "scan_id": scan.id
         })
 
     except Exception as e:
@@ -542,7 +552,7 @@ def scan_database():
     finally:
         session.close()
 
-def process_column_data(session, connector_id: str, db_name: str, table_name: str, column_name: str, values: List[any], pii_types: List[PIIType]):
+def process_column_data(session, scan : Scan, connector_id: str, db_name: str, table_name: str, column_name: str, values: List[any], pii_types: List[PIIType]):
     """Process and store column data scanning results."""
     try:
         pii_matches = defaultdict(int)
@@ -557,21 +567,20 @@ def process_column_data(session, connector_id: str, db_name: str, table_name: st
                         pii_matches[pii_id] += 1
 
         # Find primary PII type (highest match count)
-        primary_pii = (None, 0)
         for pii_id, match_count in pii_matches.items():
             if match_count / total_rows > 0.5:  # More than 50% match rate
                 if match_count > primary_pii[1]:
                     primary_pii = (pii_id, match_count)
-        
+
         # Create column scan record
         column_scan = ColumnScan(
-            connector_id=connector_id,
             db_name=db_name,
             table_name=table_name,
             column_name=column_name,
             total_rows=total_rows,
             primary_pii_type=primary_pii[0],
-            primary_pii_match_count=primary_pii[1]
+            primary_pii_match_count=primary_pii[1],
+            scan=scan
         )
         
         session.add(column_scan)
@@ -582,10 +591,10 @@ def process_column_data(session, connector_id: str, db_name: str, table_name: st
             if pii_id != primary_pii[0] and match_count > 0:
                 confidence_score = match_count / total_rows
                 anomaly = ScanAnomaly(
-                    column_scan_id=column_scan.id,
                     pii_type=pii_id,
                     match_count=match_count,
-                    confidence_score=confidence_score
+                    confidence_score=confidence_score,
+                    column_scan=column_scan
                 )
                 session.add(anomaly)
         
@@ -593,61 +602,111 @@ def process_column_data(session, connector_id: str, db_name: str, table_name: st
         print(f"Error processing column {column_name}: {str(e)}")
         raise
 
-@app.route("/get-scan-results/<connector_id>", methods=["GET", "OPTIONS"])
-def get_scan_results(connector_id):
-    """Get the scanning results and anomalies for a specific connector."""
+
+@app.route("/get-scan-results/<int:scan_id>", methods=["GET"])
+def get_scan_results(scan_id):
+    """Get the scanning results and anomalies for a specific scan ID."""
     if request.method == "OPTIONS":
         # CORS preflight request, just return OK (200)
         return '', 200
-
+    
     session = Session()
     try:
-        scans = session.query(ColumnScan).filter(ColumnScan.connector_id == connector_id).all()
-        
-        if not scans:
-            return jsonify({"error": "No scan results found for this connector"}), 404
-        
-        results = []
-        pii_type_totals = defaultdict(int)  # Track totals for each PII type
-        
-        for scan in scans:
-            # Add primary PII matches to totals
-            if scan.primary_pii_type and scan.primary_pii_match_count:
-                pii_type_totals[scan.primary_pii_type] += scan.primary_pii_match_count
-            
-            # Add anomaly matches to totals
-            for anomaly in scan.anomalies:
+        # Query the Scan model first
+        scan = session.query(Scan).filter(Scan.id == scan_id).first()
+
+        if not scan:
+            return jsonify({"error": "No scan found with this ID"}), 404
+
+        # Get all column scans for this scan
+        column_scans = scan.column_scans
+
+        # Prepare the response data
+        scan_data = {
+            "scan_id": scan.id,
+            "scan_name": scan.name,
+            "connector_id": scan.connector_id,
+            "created_at": scan.created_at.isoformat() if scan.created_at else None,
+            "columns": []
+        }
+
+        # Totals across all columns
+        pii_type_totals = defaultdict(int)
+
+        # Process each column scan
+        for column_scan in column_scans:
+            # Add primary PII to totals
+            if column_scan.primary_pii_type and column_scan.primary_pii_match_count:
+                pii_type_totals[column_scan.primary_pii_type] += column_scan.primary_pii_match_count
+
+            # Add anomalies to totals
+            for anomaly in column_scan.anomalies:
                 pii_type_totals[anomaly.pii_type] += anomaly.match_count
-            
-            scan_data = {
-                "db_name": scan.db_name,
-                "table_name": scan.table_name,
-                "column_name": scan.column_name,
-                "scan_date": scan.scan_date.isoformat(),
-                "total_rows": scan.total_rows,
-                "primary_pii_type": scan.primary_pii_type,
-                "primary_pii_match_count": scan.primary_pii_match_count,
+
+            # Create column data
+            column_data = {
+                "id": column_scan.id,
+                "db_name": column_scan.db_name,
+                "table_name": column_scan.table_name,
+                "column_name": column_scan.column_name,
+                "total_rows": column_scan.total_rows,
+                "primary_pii_type": column_scan.primary_pii_type,
+                "primary_pii_match_count": column_scan.primary_pii_match_count,
                 "anomalies": [
                     {
                         "pii_type": anomaly.pii_type,
                         "match_count": anomaly.match_count,
-                        "confidence_score": anomaly.confidence_score
+                        "confidence_score": round(anomaly.confidence_score, 3)
                     }
-                    for anomaly in scan.anomalies
+                    for anomaly in column_scan.anomalies
                 ]
             }
-            results.append(scan_data)
-        
-        # Convert defaultdict to regular dict for JSON serialization
-        pii_totals = dict(pii_type_totals)
-        
+            
+            scan_data["columns"].append(column_data)
+
         return jsonify({
-            "pii_type_totals": pii_totals,  # Total matches for each PII type
-            "scan_results": results
+            "pii_type_totals": dict(pii_type_totals),
+            "scan_result": scan_data
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+    finally:
+        session.close()
+
+
+@app.route("/get-scans", methods=["GET", "OPTIONS"])
+def get_scans():
+    """Get a list of all scans with basic details."""
+    if request.method == "OPTIONS":
+        # CORS preflight request, just return OK (200)
+        return '', 200
+    
+    session = Session()
+    try:
+        # Query all scans
+        scans = session.query(Scan).order_by(Scan.created_at.desc()).all()
+        
+        # Format the response
+        scans_list = []
+        for scan in scans:
+            scans_list.append({
+                "id": scan.id,
+                "name": scan.name,
+                "connector_id": scan.connector_id,
+                "created_at": scan.created_at.isoformat() if scan.created_at else None,
+                "column_count": len(scan.column_scans)  # Include count of columns scanned
+            })
+        
+        return jsonify({
+            "scans": scans_list,
+            "total": len(scans_list)
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+    
     finally:
         session.close()
 

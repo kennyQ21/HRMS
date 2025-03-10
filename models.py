@@ -1,27 +1,42 @@
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-import datetime
+from datetime import datetime, timezone
 
 Base = declarative_base()
+
+class Scan(Base):
+    __tablename__ = 'scans'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    connector_id = Column(String, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    # One-to-many: Scan → ColumnScan
+    column_scans = relationship("ColumnScan", back_populates="scan", cascade="all, delete-orphan")
+
 
 class ColumnScan(Base):
     __tablename__ = 'column_scans'
     
     id = Column(Integer, primary_key=True)
-    connector_id = Column(String, nullable=False)
+    scan_id = Column(Integer, ForeignKey('scans.id'))  
     db_name = Column(String, nullable=False)
     table_name = Column(String, nullable=False)
     column_name = Column(String, nullable=False)
-    scan_date = Column(DateTime, default=datetime.datetime.utcnow)
     total_rows = Column(Integer, default=0)
     
-    # Store the detected PII type (if any)
     primary_pii_type = Column(String, nullable=True)
     primary_pii_match_count = Column(Integer, default=0)
-    
-    # Relationship with anomalies
-    anomalies = relationship("ScanAnomaly", back_populates="column_scan")
+
+    # Relationship to parent Scan
+    scan = relationship("Scan", back_populates="column_scans")
+
+    # One-to-many: ColumnScan → ScanAnomaly
+    anomalies = relationship("ScanAnomaly", back_populates="column_scan", cascade="all, delete-orphan")
+
+
 
 class ScanAnomaly(Base):
     __tablename__ = 'scan_anomalies'
@@ -37,4 +52,4 @@ class ScanAnomaly(Base):
 
 # Create SQLite database
 engine = create_engine('sqlite:///pii_scans.db')
-Base.metadata.create_all(engine) 
+Base.metadata.create_all(engine)
