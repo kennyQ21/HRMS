@@ -15,6 +15,9 @@ from models import ColumnScan, ScanAnomaly, Scan, engine
 import re
 from typing import List, Tuple
 from collections import defaultdict
+from parsers.structured.excel_parser import ExcelParser
+from parsers.structured.csv_parser import CSVParser
+from werkzeug.utils import secure_filename
 
 
 
@@ -710,6 +713,76 @@ def get_scans():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     
+    finally:
+        session.close()
+
+
+@app.route("/scan-file", methods=["POST"])
+def scan_file():
+    """Scan an Excel or CSV file and return structured data"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+        
+    file = request.files['file']
+    filename = file.filename.lower()
+    
+    # Check file extension
+    if filename.endswith('.xlsx') or filename.endswith('.xls'):
+        parser = ExcelParser()
+    elif filename.endswith('.csv'):
+        parser = CSVParser()
+    else:
+        return jsonify({'error': 'Invalid file format. Supported formats: xlsx, xls, csv'}), 400
+    
+    session = Session()
+    
+    try:
+        # Save file temporarily
+        temp_path = f"/tmp/{secure_filename(file.filename)}"
+        file.save(temp_path)
+        
+        # Parse file
+        parsed_data = parser.parse(temp_path)
+        
+        if not parser.validate(parsed_data):
+            raise ValueError("Invalid file structure")
+        
+        # Create scan record
+        scan = Scan(
+            name=f"File_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            connector_id=f"{filename.split('.')[-1]}_parser"
+        )
+        session.add(scan)
+        session.flush()
+        
+        # Process each column
+        for column in parsed_data['metadata']['columns']:
+            column_values = [row.get(column) for row in parsed_data['data']]
+            process_column_data(
+                session, 
+                scan,
+                f"{filename.split('.')[-1]}_parser",
+                os.path.basename(file.filename),
+                "sheet1" if filename.endswith(('.xlsx', '.xls')) else "data",
+                column,
+                column_values,
+                PII_TYPES
+            )
+        
+        session.commit()
+        
+        # Clean up
+        os.remove(temp_path)
+        
+        return jsonify({
+            'status': 'success',
+            'scan_id': scan.id,
+            'metadata': parsed_data['metadata']
+        })
+        
+    except Exception as e:
+        session.rollback()
+        return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 

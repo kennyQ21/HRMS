@@ -23,6 +23,7 @@ class GoogleDriveConnector:
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
     
     def __init__(self, credentials_path: str, token_path: str):
+        super().__init__()
         self.credentials_path = credentials_path
         self.token_path = token_path
         self.creds = None
@@ -86,37 +87,42 @@ class GoogleDriveConnector:
             logger.error(f"Error listing files from Google Drive: {str(e)}")
             raise
 
-    def download_file(self, file_id: str, output_path: str) -> bool:
+    def download_file(self, file_id: str, output_dir: str) -> str:
         """
-        Download a file from Google Drive.
+        Download a file from Google Drive
         
         Args:
-            file_id: ID of the file to download
-            output_path: Path where the file should be saved
-        
+            file_id: Google Drive file ID
+            output_dir: Directory to save the file
+            
         Returns:
-            bool: True if successful, False otherwise
+            Path to downloaded file
         """
         try:
-            request = self.service.files().get_media(fileId=file_id)
-            file = io.BytesIO()
-            downloader = MediaIoBaseDownload(file, request)
-            done = False
-            
-            while done is False:
-                status, done = downloader.next_chunk()
-                if status:
-                    logger.info(f"Download Progress: {int(status.progress() * 100)}%")
-            
-            file.seek(0)
-            with open(output_path, 'wb') as f:
-                f.write(file.read())
+            if not self.service:
+                self.authenticate()
                 
-            return True
+            # Get file metadata
+            file_metadata = self.service.files().get(fileId=file_id).execute()
+            file_name = file_metadata['name']
+            
+            # Create request to download file
+            request = self.service.files().get_media(fileId=file_id)
+            
+            # Download the file
+            output_path = os.path.join(output_dir, file_name)
+            with open(output_path, 'wb') as f:
+                downloader = MediaIoBaseDownload(f, request)
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
+                    
+            logger.info(f"Downloaded file: {file_name}")
+            return output_path
             
         except Exception as e:
-            logger.error(f"Error downloading file from Google Drive: {str(e)}")
-            return False
+            logger.error(f"Error downloading file: {str(e)}")
+            raise
 
 
 class EmailConnector:
