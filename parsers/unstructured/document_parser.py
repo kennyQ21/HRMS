@@ -182,8 +182,17 @@ class DocumentParser(BaseParser):
             
         required_metadata = ['columns', 'rows']
         return all(key in data.get('metadata', {}) for key in required_metadata)
-   
+    
 class PDFParser(BaseParser):
+    def __init__(self, password=None):
+        """Initialize the parser with an optional password for protected PDFs.
+        
+        Args:
+            password (str, optional): Password for protected PDF files.
+        """
+        super().__init__()
+        self.password = password
+    
     def parse(self, file_path: str) -> Dict[str, Any]:
         import PyPDF2
         import pytesseract
@@ -283,8 +292,39 @@ class PDFParser(BaseParser):
         
         text = ""
         try:
+            try:
+                import Crypto
+            except ImportError:
+                pass
+                
             with open(file_path, "rb") as file:
                 pdf_reader = PyPDF2.PdfReader(file)
+                
+                # Handle password-protected PDFs
+                if pdf_reader.is_encrypted:
+                    # If no password provided, raise an error
+                    if not self.password:
+                        raise ValueError("PDF is password protected. Password required.")
+                    
+                    try:
+                        # Try to decrypt with the provided password
+                        decrypt_success = pdf_reader.decrypt(self.password)
+                        
+                        # If decryption failed, raise an error
+                        if decrypt_success == 0:  # 0 means wrong password, 1 or 2 means success
+                            raise ValueError("Incorrect PDF password provided.")
+                    except ModuleNotFoundError as e:
+                        if "PyCryptodome" in str(e) or "Crypto" in str(e):
+                            raise ValueError("PyCryptodome is required for decrypting password-protected PDFs. Install with: pip install pycryptodome")
+                        else:
+                            raise e
+                    except Exception as e:
+                        if "PyCryptodome is required" in str(e):
+                            raise ValueError("PyCryptodome is required for decrypting password-protected PDFs. Install with: pip install pycryptodome")
+                        else:
+                            raise e
+                
+                # Now extract text from the PDF
                 for page_num in range(len(pdf_reader.pages)):
                     page = pdf_reader.pages[page_num]
                     page_text = page.extract_text()
@@ -292,6 +332,7 @@ class PDFParser(BaseParser):
                         text += page_text + "\n\n"
         except Exception as e:
             print(f"Error extracting text with PyPDF2: {str(e)}")
+            raise e  # Re-raise the exception to be caught by the main function
                 
         return text
     
@@ -301,7 +342,11 @@ class PDFParser(BaseParser):
         
         text = ""
         try:
-            images = convert_from_path(file_path, dpi=300)
+            # For password-protected PDFs, we need to pass the password to convert_from_path
+            if self.password:
+                images = convert_from_path(file_path, dpi=300, userpw=self.password)
+            else:
+                images = convert_from_path(file_path, dpi=300)
             
             configs = [
                 '',

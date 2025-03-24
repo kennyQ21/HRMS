@@ -783,12 +783,23 @@ def scan_file():
     from werkzeug.utils import secure_filename
     from collections import defaultdict
     import re
+    import PyPDF2
+    
+    # Check for PyCryptodome for handling encrypted PDFs
+    try:
+        import Crypto
+    except ImportError:
+        # We'll handle this later if we encounter an encrypted PDF
+        pass
     
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
         
     file = request.files['file']
     filename = file.filename.lower()
+    
+    # Get password parameters if provided
+    password = request.form.get('password', None)
     
     session = Session()
     all_scan_results = []
@@ -811,7 +822,22 @@ def scan_file():
             
             try:
                 with zipfile.ZipFile(temp_upload_path, 'r') as zip_ref:
-                    zip_ref.extractall(extract_dir)
+                    # Check if file is password protected
+                    is_encrypted = any(zi.flag_bits & 0x1 for zi in zip_ref.filelist)
+                    
+                    if is_encrypted and not password:
+                        return jsonify({'error': 'ZIP file is password protected. Please provide a password.'}), 400
+                    
+                    try:
+                        # Extract with password if provided and needed
+                        if is_encrypted:
+                            zip_ref.extractall( pwd=password.encode('utf-8'))
+                        else:
+                            zip_ref.extractall(extract_dir)
+                    except RuntimeError as e:
+                        if "Bad password" in str(e):
+                            return jsonify({'error': 'Incorrect ZIP password'}), 401
+                        raise
                 
                 for root, _, files in os.walk(extract_dir):
                     for extracted_file in files:
@@ -826,7 +852,7 @@ def scan_file():
                         elif extracted_filename.endswith(('.docx', '.doc', '.odt', '.rtf')):
                             parser = DocumentParser()
                         elif extracted_filename.endswith('.pdf'):
-                            parser = PDFParser()
+                            parser = PDFParser(password=password)
                         elif extracted_filename.endswith('.mdb'):
                             parser = MDBParser()
                         elif extracted_filename.endswith('.sql'):
@@ -922,11 +948,15 @@ def scan_file():
                             })
                                 
                         except Exception as file_error:
-                            print(f"Error processing {extracted_filename}: {str(file_error)}")
+                            error_message = str(file_error)
+                            if "password required" in error_message.lower() or "incorrect password" in error_message.lower():
+                                error_message = f"Password protected file. Please provide the correct password."
+                            
+                            print(f"Error processing {extracted_filename}: {error_message}")
                             all_scan_results.append({
                                 'filename': extracted_filename,
                                 'status': 'error',
-                                'error': str(file_error)
+                                'error': error_message
                             })
                 
             finally:
@@ -940,7 +970,11 @@ def scan_file():
             elif filename.endswith(('.docx', '.doc', '.odt', '.rtf')):
                 parser = DocumentParser()
             elif filename.endswith('.pdf'):
-                parser = PDFParser()
+                is_pdf_protected = check_pdf_is_protected(temp_upload_path)
+                if is_pdf_protected and not password:
+                    return jsonify({'error': 'PDF is password protected. Please provide a password.'}), 400
+                
+                parser = PDFParser(password=password)
             elif filename.endswith('.mdb'):
                 parser = MDBParser()
             elif filename.endswith('.sql'):
@@ -948,81 +982,88 @@ def scan_file():
             else:
                 return jsonify({'error': 'Unsupported file format'}), 400
             
-            # Parse file
-            parsed_data = parser.parse(temp_upload_path)
-            
-            if not parser.validate(parsed_data):
-                raise ValueError("Invalid file structure")
-            
-            # Process based on file type
-            if filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
-                text_content = parsed_data['data'][0].get('content', '')
-                process_document_content(
-                    session,
-                    scan,
-                    f"{filename.split('.')[-1]}_parser",
-                    os.path.basename(filename),
-                    text_content,
-                    PII_TYPES
-                )
-            elif filename.endswith('.sql'):
-                for item in parsed_data['data']:
-                    content_type = item.get('content_type', '')
-                    text_content = item.get('content', '')
-                    
-                    if content_type == 'full_sql':
-                        process_document_content(
-                            session,
-                            scan,
-                            "sql_parser",
-                            os.path.basename(filename),
-                            text_content,
-                            PII_TYPES
-                        )
-                    elif content_type == 'table_definition':
-                        table_name = item.get('table_name', 'unknown_table')
-                        process_document_content(
-                            session,
-                            scan,
-                            "sql_parser",
-                            os.path.basename(filename),
-                            f"Table {table_name}: {text_content}",
-                            PII_TYPES
-                        )
-            elif filename.endswith('.mdb'):
-                for table_data in parsed_data['data']:
-                    table_name = table_data['table_name']
-                    for column in table_data['columns']:
-                        column_values = [row.get(column) for row in table_data['rows']]
+            try:
+                # Parse file
+                parsed_data = parser.parse(temp_upload_path)
+                
+                if not parser.validate(parsed_data):
+                    raise ValueError("Invalid file structure")
+                
+                # Process based on file type
+                if filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
+                    text_content = parsed_data['data'][0].get('content', '')
+                    process_document_content(
+                        session,
+                        scan,
+                        f"{filename.split('.')[-1]}_parser",
+                        os.path.basename(filename),
+                        text_content,
+                        PII_TYPES
+                    )
+                elif filename.endswith('.sql'):
+                    for item in parsed_data['data']:
+                        content_type = item.get('content_type', '')
+                        text_content = item.get('content', '')
+                        
+                        if content_type == 'full_sql':
+                            process_document_content(
+                                session,
+                                scan,
+                                "sql_parser",
+                                os.path.basename(filename),
+                                text_content,
+                                PII_TYPES
+                            )
+                        elif content_type == 'table_definition':
+                            table_name = item.get('table_name', 'unknown_table')
+                            process_document_content(
+                                session,
+                                scan,
+                                "sql_parser",
+                                os.path.basename(filename),
+                                f"Table {table_name}: {text_content}",
+                                PII_TYPES
+                            )
+                elif filename.endswith('.mdb'):
+                    for table_data in parsed_data['data']:
+                        table_name = table_data['table_name']
+                        for column in table_data['columns']:
+                            column_values = [row.get(column) for row in table_data['rows']]
+                            process_column_data(
+                                session, 
+                                scan,
+                                "mdb_parser",
+                                os.path.basename(filename),
+                                table_name,
+                                column,
+                                column_values,
+                                PII_TYPES
+                            )
+                else:
+                    for column in parsed_data['metadata']['columns']:
+                        column_values = [row.get(column) for row in parsed_data['data']]
                         process_column_data(
                             session, 
                             scan,
-                            "mdb_parser",
+                            f"{filename.split('.')[-1]}_parser",
                             os.path.basename(filename),
-                            table_name,
+                            "sheet1" if filename.endswith(('.xlsx', '.xls')) else "data",
                             column,
                             column_values,
                             PII_TYPES
                         )
-            else:
-                for column in parsed_data['metadata']['columns']:
-                    column_values = [row.get(column) for row in parsed_data['data']]
-                    process_column_data(
-                        session, 
-                        scan,
-                        f"{filename.split('.')[-1]}_parser",
-                        os.path.basename(filename),
-                        "sheet1" if filename.endswith(('.xlsx', '.xls')) else "data",
-                        column,
-                        column_values,
-                        PII_TYPES
-                    )
-            
-            all_scan_results.append({
-                'filename': filename,
-                'status': 'success',
-                'metadata': parsed_data['metadata']
-            })
+                
+                all_scan_results.append({
+                    'filename': filename,
+                    'status': 'success',
+                    'metadata': parsed_data['metadata']
+                })
+                
+            except Exception as e:
+                error_message = str(e)
+                if "password required" in error_message.lower() or "incorrect password" in error_message.lower():
+                    return jsonify({'error': 'Password protected file. Please provide the correct password.'}), 401
+                raise
         
         # Clean up
         os.remove(temp_upload_path)
@@ -1038,10 +1079,30 @@ def scan_file():
         
     except Exception as e:
         session.rollback()
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()      
+        error_message = str(e)
         
+        # Handle specific errors with informative messages
+        if "PyCryptodome is required" in error_message:
+            return jsonify({
+                'error': 'Missing dependency: PyCryptodome is required for encrypted PDFs',
+                'solution': 'Please install with: pip install pycryptodome'
+            }), 500
+        
+        return jsonify({'error': error_message}), 500
+    finally:
+        session.close()
+
+def check_pdf_is_protected(file_path):
+    import PyPDF2
+    """Check if a PDF file is password protected"""
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            if pdf_reader.is_encrypted:
+                return True
+            return False
+    except Exception:
+        return False 
               
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
