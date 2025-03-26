@@ -17,6 +17,10 @@ from typing import List, Tuple
 from collections import defaultdict
 from parsers.structured.excel_parser import ExcelParser
 from parsers.structured.csv_parser import CSVParser
+from parsers.unstructured.document_parser import DocumentParser
+from parsers.unstructured.document_parser import PDFParser
+from parsers.unstructured.access_parser import MDBParser
+from parsers.unstructured.sql_parser import SQLParser
 from werkzeug.utils import secure_filename
 
 
@@ -716,76 +720,389 @@ def get_scans():
     finally:
         session.close()
 
+import re
+from typing import List, Dict, Tuple, Any
+from collections import defaultdict
+def process_document_content(session, scan, connector_id: str, db_name: str, text_content: str, pii_types: List[PIIType]):
+    """Process and store document content scanning results."""
+    pii_matches = defaultdict(int)
+    total_rows = 1  
+    
+    for pii_type in pii_types:
+        pattern = re.compile(pii_type['regex'])
+        
+        matches = pattern.findall(text_content)
+        match_count = len(matches)
+        
+        if match_count > 0:
+            print(f"Found {match_count} matches for {pii_type['name']}: {matches[:3]}")
+        
+        if match_count > 0:
+            pii_matches[pii_type['id']] = match_count
+    
+    primary_pii = (None, 0)  # (pii_id, match_count)
+    for pii_id, match_count in pii_matches.items():
+        if match_count > primary_pii[1]:
+            primary_pii = (pii_id, match_count)
+    
+    column_scan = ColumnScan(
+        db_name=db_name,
+        table_name="document",
+        column_name="content",
+        total_rows=total_rows,
+        primary_pii_type=primary_pii[0],
+        primary_pii_match_count=primary_pii[1],
+        scan=scan
+    )
+    
+    session.add(column_scan)
+    session.flush()
+    
+    for pii_id, match_count in pii_matches.items():
+        if pii_id != primary_pii[0] and match_count > 0:
+            confidence_score = match_count / 100.0
+            anomaly = ScanAnomaly(
+                pii_type=pii_id,
+                match_count=match_count,
+                confidence_score=confidence_score,
+                column_scan=column_scan
+            )
+            session.add(anomaly)
+    
+    return column_scan
 
 @app.route("/scan-file", methods=["POST"])
 def scan_file():
-    """Scan an Excel or CSV file and return structured data"""
+    """Scan files including those in ZIP archives and return structured data"""
+    # Import ALL required modules at the top of the function
+    import os
+    import tempfile
+    import zipfile
+    import shutil
+    from datetime import datetime
+    from werkzeug.utils import secure_filename
+    from collections import defaultdict
+    import re
+    import PyPDF2
+    
+    # Check for PyCryptodome for handling encrypted PDFs
+    try:
+        import Crypto
+    except ImportError:
+        # We'll handle this later if we encounter an encrypted PDF
+        pass
+    
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
         
     file = request.files['file']
     filename = file.filename.lower()
     
-    # Check file extension
-    if filename.endswith('.xlsx') or filename.endswith('.xls'):
-        parser = ExcelParser()
-    elif filename.endswith('.csv'):
-        parser = CSVParser()
-    else:
-        return jsonify({'error': 'Invalid file format. Supported formats: xlsx, xls, csv'}), 400
+    # Get password parameters if provided
+    password = request.form.get('password', None)
     
     session = Session()
+    all_scan_results = []
     
     try:
         # Save file temporarily
-        temp_path = f"/tmp/{secure_filename(file.filename)}"
-        file.save(temp_path)
-        
-        # Parse file
-        parsed_data = parser.parse(temp_path)
-        
-        if not parser.validate(parsed_data):
-            raise ValueError("Invalid file structure")
+        temp_upload_path = f"/tmp/{secure_filename(file.filename)}"
+        file.save(temp_upload_path)
         
         # Create scan record
         scan = Scan(
             name=f"File_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            connector_id=f"{filename.split('.')[-1]}_parser"
+            connector_id=f"file_upload"
         )
         session.add(scan)
         session.flush()
         
-        # Process each column
-        for column in parsed_data['metadata']['columns']:
-            column_values = [row.get(column) for row in parsed_data['data']]
-            process_column_data(
-                session, 
-                scan,
-                f"{filename.split('.')[-1]}_parser",
-                os.path.basename(file.filename),
-                "sheet1" if filename.endswith(('.xlsx', '.xls')) else "data",
-                column,
-                column_values,
-                PII_TYPES
-            )
-        
-        session.commit()
+        if filename.endswith('.zip'):
+            extract_dir = tempfile.mkdtemp(prefix="zip_extract_")
+            
+            try:
+                with zipfile.ZipFile(temp_upload_path, 'r') as zip_ref:
+                    # Check if file is password protected
+                    is_encrypted = any(zi.flag_bits & 0x1 for zi in zip_ref.filelist)
+                    
+                    if is_encrypted and not password:
+                        return jsonify({'error': 'ZIP file is password protected. Please provide a password.'}), 400
+                    
+                    try:
+                        # Extract with password if provided and needed
+                        if is_encrypted:
+                            zip_ref.extractall( pwd=password.encode('utf-8'))
+                        else:
+                            zip_ref.extractall(extract_dir)
+                    except RuntimeError as e:
+                        if "Bad password" in str(e):
+                            return jsonify({'error': 'Incorrect ZIP password'}), 401
+                        raise
+                
+                for root, _, files in os.walk(extract_dir):
+                    for extracted_file in files:
+                        extracted_path = os.path.join(root, extracted_file)
+                        extracted_filename = extracted_file.lower()
+                        
+                        # Process each file based on its type
+                        if extracted_filename.endswith(('.xlsx', '.xls')):
+                            parser = ExcelParser()
+                        elif extracted_filename.endswith('.csv'):
+                            parser = CSVParser()
+                        elif extracted_filename.endswith(('.docx', '.doc', '.odt', '.rtf')):
+                            parser = DocumentParser()
+                        elif extracted_filename.endswith('.pdf'):
+                            parser = PDFParser(password=password)
+                        elif extracted_filename.endswith('.mdb'):
+                            parser = MDBParser()
+                        elif extracted_filename.endswith('.sql'):
+                            parser = SQLParser()
+                        else:
+                            all_scan_results.append({
+                                'filename': extracted_filename,
+                                'status': 'skipped',
+                                'reason': 'Unsupported file format'
+                            })
+                            continue
+                        
+                        try:
+                            # Parse file
+                            parsed_data = parser.parse(extracted_path)
+                            
+                            if not parser.validate(parsed_data):
+                                all_scan_results.append({
+                                    'filename': extracted_filename,
+                                    'status': 'error',
+                                    'error': 'Invalid file structure'
+                                })
+                                continue
+                            
+                            # Process based on file type
+                            if extracted_filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
+                                text_content = parsed_data['data'][0].get('content', '')
+                                process_document_content(
+                                    session,
+                                    scan,
+                                    f"{extracted_filename.split('.')[-1]}_parser",
+                                    os.path.basename(extracted_filename),
+                                    text_content,
+                                    PII_TYPES
+                                )
+                            elif extracted_filename.endswith('.sql'):
+                                for item in parsed_data['data']:
+                                    content_type = item.get('content_type', '')
+                                    text_content = item.get('content', '')
+                                    
+                                    if content_type == 'full_sql':
+                                        process_document_content(
+                                            session,
+                                            scan,
+                                            "sql_parser",
+                                            os.path.basename(extracted_filename),
+                                            text_content,
+                                            PII_TYPES
+                                        )
+                                    elif content_type == 'table_definition':
+                                        table_name = item.get('table_name', 'unknown_table')
+                                        process_document_content(
+                                            session,
+                                            scan,
+                                            "sql_parser",
+                                            os.path.basename(extracted_filename),
+                                            f"Table {table_name}: {text_content}",
+                                            PII_TYPES
+                                        )
+                            elif extracted_filename.endswith('.mdb'):
+                                for table_data in parsed_data['data']:
+                                    table_name = table_data['table_name']
+                                    for column in table_data['columns']:
+                                        column_values = [row.get(column) for row in table_data['rows']]
+                                        process_column_data(
+                                            session, 
+                                            scan,
+                                            "mdb_parser",
+                                            os.path.basename(extracted_filename),
+                                            table_name,
+                                            column,
+                                            column_values,
+                                            PII_TYPES
+                                        )
+                            else:
+                                for column in parsed_data['metadata']['columns']:
+                                    column_values = [row.get(column) for row in parsed_data['data']]
+                                    process_column_data(
+                                        session, 
+                                        scan,
+                                        f"{extracted_filename.split('.')[-1]}_parser",
+                                        os.path.basename(extracted_filename),
+                                        "sheet1" if extracted_filename.endswith(('.xlsx', '.xls')) else "data",
+                                        column,
+                                        column_values,
+                                        PII_TYPES
+                                    )
+                                
+                            all_scan_results.append({
+                                'filename': extracted_filename,
+                                'status': 'success',
+                                'metadata': parsed_data['metadata']
+                            })
+                                
+                        except Exception as file_error:
+                            error_message = str(file_error)
+                            if "password required" in error_message.lower() or "incorrect password" in error_message.lower():
+                                error_message = f"Password protected file. Please provide the correct password."
+                            
+                            print(f"Error processing {extracted_filename}: {error_message}")
+                            all_scan_results.append({
+                                'filename': extracted_filename,
+                                'status': 'error',
+                                'error': error_message
+                            })
+                
+            finally:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+        else:
+            # Process single file
+            if filename.endswith(('.xlsx', '.xls')):
+                parser = ExcelParser()
+            elif filename.endswith('.csv'):
+                parser = CSVParser()
+            elif filename.endswith(('.docx', '.doc', '.odt', '.rtf')):
+                parser = DocumentParser()
+            elif filename.endswith('.pdf'):
+                is_pdf_protected = check_pdf_is_protected(temp_upload_path)
+                if is_pdf_protected and not password:
+                    return jsonify({'error': 'PDF is password protected. Please provide a password.'}), 400
+                
+                parser = PDFParser(password=password)
+            elif filename.endswith('.mdb'):
+                parser = MDBParser()
+            elif filename.endswith('.sql'):
+                parser = SQLParser()
+            else:
+                return jsonify({'error': 'Unsupported file format'}), 400
+            
+            try:
+                # Parse file
+                parsed_data = parser.parse(temp_upload_path)
+                
+                if not parser.validate(parsed_data):
+                    raise ValueError("Invalid file structure")
+                
+                # Process based on file type
+                if filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
+                    text_content = parsed_data['data'][0].get('content', '')
+                    process_document_content(
+                        session,
+                        scan,
+                        f"{filename.split('.')[-1]}_parser",
+                        os.path.basename(filename),
+                        text_content,
+                        PII_TYPES
+                    )
+                elif filename.endswith('.sql'):
+                    for item in parsed_data['data']:
+                        content_type = item.get('content_type', '')
+                        text_content = item.get('content', '')
+                        
+                        if content_type == 'full_sql':
+                            process_document_content(
+                                session,
+                                scan,
+                                "sql_parser",
+                                os.path.basename(filename),
+                                text_content,
+                                PII_TYPES
+                            )
+                        elif content_type == 'table_definition':
+                            table_name = item.get('table_name', 'unknown_table')
+                            process_document_content(
+                                session,
+                                scan,
+                                "sql_parser",
+                                os.path.basename(filename),
+                                f"Table {table_name}: {text_content}",
+                                PII_TYPES
+                            )
+                elif filename.endswith('.mdb'):
+                    for table_data in parsed_data['data']:
+                        table_name = table_data['table_name']
+                        for column in table_data['columns']:
+                            column_values = [row.get(column) for row in table_data['rows']]
+                            process_column_data(
+                                session, 
+                                scan,
+                                "mdb_parser",
+                                os.path.basename(filename),
+                                table_name,
+                                column,
+                                column_values,
+                                PII_TYPES
+                            )
+                else:
+                    for column in parsed_data['metadata']['columns']:
+                        column_values = [row.get(column) for row in parsed_data['data']]
+                        process_column_data(
+                            session, 
+                            scan,
+                            f"{filename.split('.')[-1]}_parser",
+                            os.path.basename(filename),
+                            "sheet1" if filename.endswith(('.xlsx', '.xls')) else "data",
+                            column,
+                            column_values,
+                            PII_TYPES
+                        )
+                
+                all_scan_results.append({
+                    'filename': filename,
+                    'status': 'success',
+                    'metadata': parsed_data['metadata']
+                })
+                
+            except Exception as e:
+                error_message = str(e)
+                if "password required" in error_message.lower() or "incorrect password" in error_message.lower():
+                    return jsonify({'error': 'Password protected file. Please provide the correct password.'}), 401
+                raise
         
         # Clean up
-        os.remove(temp_path)
+        os.remove(temp_upload_path)
+        
+        session.commit()
         
         return jsonify({
             'status': 'success',
             'scan_id': scan.id,
-            'metadata': parsed_data['metadata']
+            'file_count': len(all_scan_results),
+            'results': all_scan_results
         })
         
     except Exception as e:
         session.rollback()
-        return jsonify({'error': str(e)}), 500
+        error_message = str(e)
+        
+        # Handle specific errors with informative messages
+        if "PyCryptodome is required" in error_message:
+            return jsonify({
+                'error': 'Missing dependency: PyCryptodome is required for encrypted PDFs',
+                'solution': 'Please install with: pip install pycryptodome'
+            }), 500
+        
+        return jsonify({'error': error_message}), 500
     finally:
         session.close()
 
-
+def check_pdf_is_protected(file_path):
+    import PyPDF2
+    """Check if a PDF file is password protected"""
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            if pdf_reader.is_encrypted:
+                return True
+            return False
+    except Exception:
+        return False 
+              
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
