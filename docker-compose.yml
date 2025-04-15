@@ -21,4 +21,4 @@ services:
 
 networks:
   traefik_network:
-    # external: true
+    external: true
