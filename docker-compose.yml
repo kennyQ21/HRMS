@@ -12,8 +12,8 @@ services:
       
       # HTTP Router Configuration
       - "traefik.http.routers.vault-router.rule=Host(`datamigration.getpatronus.com`)"
-      - "traefik.http.routers.vault-router.entrypoints=websecure"
-      - "traefik.http.routers.vault-router.tls=true"
+      - "traefik.http.routers.vault-router.entrypoints=web"
+      - "traefik.http.routers.vault-router.tls=false"
       - "traefik.http.services.vault-service.loadbalancer.server.port=5000"
 
     networks:
