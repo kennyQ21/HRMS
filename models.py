@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
+from config import Config
 
 Base = declarative_base()
 
@@ -37,7 +38,6 @@ class ColumnScan(Base):
     anomalies = relationship("ScanAnomaly", back_populates="column_scan", cascade="all, delete-orphan")
 
 
-
 class ScanAnomaly(Base):
     __tablename__ = 'scan_anomalies'
     
@@ -50,6 +50,6 @@ class ScanAnomaly(Base):
     # Relationship with parent scan
     column_scan = relationship("ColumnScan", back_populates="anomalies")
 
-# Create SQLite database
-engine = create_engine('sqlite:///pii_scans.db')
+# Create database engine using configuration
+engine = create_engine(Config.SQLALCHEMY_DATABASE_URI)
 Base.metadata.create_all(engine)

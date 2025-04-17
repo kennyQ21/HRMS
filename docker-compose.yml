@@ -6,7 +6,12 @@ services:
     volumes:
       - .:/app
     environment:
-      FLASK_ENV: development
+      FLASK_ENV: production
+      POSTGRES_DB: migration_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: yMnE1i6Z27RG6JCah
+      DATABASE_URL: postgres.chsgq28yetgt.ap-south-1.rds.amazonaws.com
+      DB_PORT: 5432
     labels:
       - "traefik.enable=true"
       
