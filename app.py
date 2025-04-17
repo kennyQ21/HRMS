@@ -1088,7 +1088,7 @@ def scan_file():
         
         return jsonify({'error': error_message}), 500
     finally:
-        session.close()
+        db.session.close()
 
 def check_pdf_is_protected(file_path):
     import PyPDF2
