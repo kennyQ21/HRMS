@@ -35,6 +35,8 @@ rarfile = "^4.2"
 patool = "^4.0.0"
 opencv-python = "^4.11.0.86"
 psycopg2-binary = "^2.9.10"
+flask-migrate = "^4.1.0"
+gunicorn = "^23.0.0"
 
 
 [build-system]

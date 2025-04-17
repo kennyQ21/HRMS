@@ -1,4 +1,3 @@
-import os
 from flask import Flask, jsonify, request
 from sqlalchemy import MetaData
 from flask_cors import CORS
@@ -10,8 +9,7 @@ from datetime import date, datetime
 import uuid
 from bson.objectid import ObjectId
 from constants import PII_TYPES, PIIType
-from sqlalchemy.orm import sessionmaker
-from models import ColumnScan, ScanAnomaly, Scan, engine
+from models import ColumnScan, ScanAnomaly, Scan
 import re
 from typing import List, Tuple
 from collections import defaultdict
@@ -21,15 +19,18 @@ from parsers.unstructured.document_parser import DocumentParser
 from parsers.unstructured.document_parser import PDFParser
 from parsers.unstructured.access_parser import MDBParser
 from parsers.unstructured.sql_parser import SQLParser
-from werkzeug.utils import secure_filename
-
-
+from extensions import db, migrate
+from config import Config
 
 app = Flask(__name__)
+app.config.from_object(Config)
 CORS(app)
-app.config["DEBUG"] = os.getenv("FLASK_ENV") == "development"
 
-Session = sessionmaker(bind=engine)
+# Initialize extensions
+db.init_app(app)
+migrate.init_app(app, db)
+
+Session = db.session
 
 
 @app.route("/check-connection", methods=["POST", "OPTIONS"])
@@ -484,6 +485,7 @@ def scan_database():
     connector_id = data.get("connector_id")
     pii_ids = data.get("pii_ids", [])
     scan_name = data.get("scan_name")
+    realm_name = data.get("realm_name")
 
     if not all([db_type, db_name, connector_id]):
         return jsonify({"error": "Missing required parameters"}), 400
@@ -496,24 +498,23 @@ def scan_database():
     if isinstance(engine, dict) and "error" in engine:
         return jsonify(engine), 500
 
-    session = Session()
-
     try:
-          # Delete old scans with the same connector_id
-        old_scans = session.query(Scan).filter(Scan.connector_id == connector_id).all()
+        # Delete old scans with the same connector_id
+        old_scans = Scan.query.filter_by(connector_id=connector_id).all()
         for old_scan in old_scans:
-            session.delete(old_scan)
-        session.commit()
+            db.session.delete(old_scan)
+        db.session.commit()
 
-           # Create a new scan record
+        # Create a new scan record
         scan = Scan(
             name=scan_name,
-            connector_id=connector_id
+            connector_id=connector_id,
+            realm_name=realm_name
         )
-        session.add(scan)
-        session.flush()  # Get scan.id
+        db.session.add(scan)
+        db.session.flush()
 
-        scan_results = []  # To collect results
+        scan_results = []
 
         if db_type.startswith("mongodb"):
             # MongoDB scanning logic
@@ -528,7 +529,7 @@ def scan_database():
 
                 for field in fields:
                     field_values = [doc.get(field) for doc in sample_docs if field in doc]
-                    result = process_column_data(session, connector_id, db_name, collection_name, field, field_values, selected_pii_types)
+                    result = process_column_data(db.session, scan, connector_id, db_name, collection_name, field, field_values, selected_pii_types)
                     scan_results.append(result)
 
         else:
@@ -544,20 +545,18 @@ def scan_database():
                     
                     for column in table.columns:
                         column_values = [row.get(column.name) for row in rows]
-                        result = process_column_data(session, scan, connector_id, db_name, table_name, column.name, column_values, selected_pii_types)
+                        result = process_column_data(db.session, scan, connector_id, db_name, table_name, column.name, column_values, selected_pii_types)
                         scan_results.append(result)
 
-        session.commit()
+        db.session.commit()
         return jsonify({
             "message": "Scan completed successfully",
             "scan_id": scan.id
         })
 
     except Exception as e:
-        session.rollback()
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
-    finally:
-        session.close()
 
 def process_column_data(session, scan : Scan, connector_id: str, db_name: str, table_name: str, column_name: str, values: List[any], pii_types: List[PIIType]):
     """Process and store column data scanning results."""
@@ -620,13 +619,9 @@ def get_scan_results(scan_id):
         # CORS preflight request, just return OK (200)
         return '', 200
     
-    session = Session()
     try:
         # Query the Scan model first
-        scan = session.query(Scan).filter(Scan.id == scan_id).first()
-
-        if not scan:
-            return jsonify({"error": "No scan found with this ID"}), 404
+        scan = Scan.query.get_or_404(scan_id)
 
         # Get all column scans for this scan
         column_scans = scan.column_scans
@@ -682,9 +677,6 @@ def get_scan_results(scan_id):
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-    finally:
-        session.close()
-
 
 @app.route("/get-scans", methods=["GET", "OPTIONS"])
 def get_scans():
@@ -693,10 +685,17 @@ def get_scans():
         # CORS preflight request, just return OK (200)
         return '', 200
     
-    session = Session()
+    realm_name = request.args.get('realm_name')  # Get realm_name from query parameters
+    
     try:
-        # Query all scans
-        scans = session.query(Scan).order_by(Scan.created_at.desc()).all()
+        # Base query
+        query = Scan.query.order_by(Scan.created_at.desc())
+        
+        # Apply realm_name filter if provided
+        if realm_name:
+            query = query.filter_by(realm_name=realm_name)
+        
+        scans = query.all()
         
         # Format the response
         scans_list = []
@@ -705,8 +704,9 @@ def get_scans():
                 "id": scan.id,
                 "name": scan.name,
                 "connector_id": scan.connector_id,
+                "realm_name": scan.realm_name,
                 "created_at": scan.created_at.isoformat() if scan.created_at else None,
-                "column_count": len(scan.column_scans)  # Include count of columns scanned
+                "column_count": len(scan.column_scans)
             })
         
         return jsonify({
@@ -716,9 +716,6 @@ def get_scans():
         
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-    
-    finally:
-        session.close()
 
 import re
 from typing import List, Dict, Tuple, Any
@@ -797,11 +794,11 @@ def scan_file():
         
     file = request.files['file']
     filename = file.filename.lower()
+    realm_name = request.form.get('realm_name')  # Get realm_name from form data
     
     # Get password parameters if provided
     password = request.form.get('password', None)
     
-    session = Session()
     all_scan_results = []
     
     try:
@@ -812,10 +809,11 @@ def scan_file():
         # Create scan record
         scan = Scan(
             name=f"File_Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            connector_id=f"file_upload"
+            connector_id=f"file_upload",
+            realm_name=realm_name  # Add realm_name to scan record
         )
-        session.add(scan)
-        session.flush()
+        db.session.add(scan)
+        db.session.flush()
         
         if filename.endswith('.zip'):
             extract_dir = tempfile.mkdtemp(prefix="zip_extract_")
@@ -881,7 +879,7 @@ def scan_file():
                             if extracted_filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
                                 text_content = parsed_data['data'][0].get('content', '')
                                 process_document_content(
-                                    session,
+                                    db.session,
                                     scan,
                                     f"{extracted_filename.split('.')[-1]}_parser",
                                     os.path.basename(extracted_filename),
@@ -895,7 +893,7 @@ def scan_file():
                                     
                                     if content_type == 'full_sql':
                                         process_document_content(
-                                            session,
+                                            db.session,
                                             scan,
                                             "sql_parser",
                                             os.path.basename(extracted_filename),
@@ -905,7 +903,7 @@ def scan_file():
                                     elif content_type == 'table_definition':
                                         table_name = item.get('table_name', 'unknown_table')
                                         process_document_content(
-                                            session,
+                                            db.session,
                                             scan,
                                             "sql_parser",
                                             os.path.basename(extracted_filename),
@@ -918,7 +916,7 @@ def scan_file():
                                     for column in table_data['columns']:
                                         column_values = [row.get(column) for row in table_data['rows']]
                                         process_column_data(
-                                            session, 
+                                            db.session, 
                                             scan,
                                             "mdb_parser",
                                             os.path.basename(extracted_filename),
@@ -931,7 +929,7 @@ def scan_file():
                                 for column in parsed_data['metadata']['columns']:
                                     column_values = [row.get(column) for row in parsed_data['data']]
                                     process_column_data(
-                                        session, 
+                                        db.session, 
                                         scan,
                                         f"{extracted_filename.split('.')[-1]}_parser",
                                         os.path.basename(extracted_filename),
@@ -993,7 +991,7 @@ def scan_file():
                 if filename.endswith(('.pdf', '.docx', '.doc', '.odt', '.rtf')):
                     text_content = parsed_data['data'][0].get('content', '')
                     process_document_content(
-                        session,
+                        db.session,
                         scan,
                         f"{filename.split('.')[-1]}_parser",
                         os.path.basename(filename),
@@ -1007,7 +1005,7 @@ def scan_file():
                         
                         if content_type == 'full_sql':
                             process_document_content(
-                                session,
+                                db.session,
                                 scan,
                                 "sql_parser",
                                 os.path.basename(filename),
@@ -1017,7 +1015,7 @@ def scan_file():
                         elif content_type == 'table_definition':
                             table_name = item.get('table_name', 'unknown_table')
                             process_document_content(
-                                session,
+                                db.session,
                                 scan,
                                 "sql_parser",
                                 os.path.basename(filename),
@@ -1030,7 +1028,7 @@ def scan_file():
                         for column in table_data['columns']:
                             column_values = [row.get(column) for row in table_data['rows']]
                             process_column_data(
-                                session, 
+                                db.session, 
                                 scan,
                                 "mdb_parser",
                                 os.path.basename(filename),
@@ -1043,7 +1041,7 @@ def scan_file():
                     for column in parsed_data['metadata']['columns']:
                         column_values = [row.get(column) for row in parsed_data['data']]
                         process_column_data(
-                            session, 
+                            db.session, 
                             scan,
                             f"{filename.split('.')[-1]}_parser",
                             os.path.basename(filename),
@@ -1068,7 +1066,7 @@ def scan_file():
         # Clean up
         os.remove(temp_upload_path)
         
-        session.commit()
+        db.session.commit()
         
         return jsonify({
             'status': 'success',
@@ -1078,7 +1076,7 @@ def scan_file():
         })
         
     except Exception as e:
-        session.rollback()
+        db.session.rollback()
         error_message = str(e)
         
         # Handle specific errors with informative messages

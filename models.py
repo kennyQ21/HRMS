@@ -1,55 +1,47 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
-from config import Config
+from extensions import db
 
-Base = declarative_base()
-
-class Scan(Base):
+class Scan(db.Model):
     __tablename__ = 'scans'
 
-    id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)
-    connector_id = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String, nullable=False)
+    connector_id = db.Column(db.String, nullable=False)
+    realm_name = db.Column(db.String, nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # One-to-many: Scan → ColumnScan
-    column_scans = relationship("ColumnScan", back_populates="scan", cascade="all, delete-orphan")
+    column_scans = db.relationship("ColumnScan", back_populates="scan", cascade="all, delete-orphan")
 
 
-class ColumnScan(Base):
+class ColumnScan(db.Model):
     __tablename__ = 'column_scans'
     
-    id = Column(Integer, primary_key=True)
-    scan_id = Column(Integer, ForeignKey('scans.id'))  
-    db_name = Column(String, nullable=False)
-    table_name = Column(String, nullable=False)
-    column_name = Column(String, nullable=False)
-    total_rows = Column(Integer, default=0)
+    id = db.Column(db.Integer, primary_key=True)
+    scan_id = db.Column(db.Integer, db.ForeignKey('scans.id'))  
+    db_name = db.Column(db.String, nullable=False)
+    table_name = db.Column(db.String, nullable=False)
+    column_name = db.Column(db.String, nullable=False)
+    total_rows = db.Column(db.Integer, default=0)
     
-    primary_pii_type = Column(String, nullable=True)
-    primary_pii_match_count = Column(Integer, default=0)
+    primary_pii_type = db.Column(db.String, nullable=True)
+    primary_pii_match_count = db.Column(db.Integer, default=0)
 
     # Relationship to parent Scan
-    scan = relationship("Scan", back_populates="column_scans")
+    scan = db.relationship("Scan", back_populates="column_scans")
 
     # One-to-many: ColumnScan → ScanAnomaly
-    anomalies = relationship("ScanAnomaly", back_populates="column_scan", cascade="all, delete-orphan")
+    anomalies = db.relationship("ScanAnomaly", back_populates="column_scan", cascade="all, delete-orphan")
 
 
-class ScanAnomaly(Base):
+class ScanAnomaly(db.Model):
     __tablename__ = 'scan_anomalies'
     
-    id = Column(Integer, primary_key=True)
-    column_scan_id = Column(Integer, ForeignKey('column_scans.id'))
-    pii_type = Column(String, nullable=False)
-    match_count = Column(Integer, default=0)
-    confidence_score = Column(Float)
+    id = db.Column(db.Integer, primary_key=True)
+    column_scan_id = db.Column(db.Integer, db.ForeignKey('column_scans.id'))
+    pii_type = db.Column(db.String, nullable=False)
+    match_count = db.Column(db.Integer, default=0)
+    confidence_score = db.Column(db.Float)
     
     # Relationship with parent scan
-    column_scan = relationship("ColumnScan", back_populates="anomalies")
-
-# Create database engine using configuration
-engine = create_engine(Config.SQLALCHEMY_DATABASE_URI)
-Base.metadata.create_all(engine)
+    column_scan = db.relationship("ColumnScan", back_populates="anomalies")

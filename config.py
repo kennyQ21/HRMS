@@ -3,6 +3,10 @@ import os
 class Config:
     FLASK_ENV = os.getenv('FLASK_ENV', 'development')
     
+    # Flask configuration
+    SECRET_KEY = os.getenv('SECRET_KEY', 'dev')
+    DEBUG = FLASK_ENV == 'development'
+    
     # Database configuration
     if FLASK_ENV == 'production':
         DB_TYPE = 'postgres'
@@ -16,4 +20,8 @@ class Config:
         # Development environment - use SQLite
         DB_TYPE = 'sqlite'
         DB_NAME = 'pii_scans.db'
-        SQLALCHEMY_DATABASE_URI = f"sqlite:///{DB_NAME}" 
+        SQLALCHEMY_DATABASE_URI = f"sqlite:///{DB_NAME}"
+    
+    # Flask-SQLAlchemy configuration
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ECHO = DEBUG 
