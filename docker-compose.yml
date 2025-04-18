@@ -13,19 +13,19 @@ services:
       POSTGRES_PASSWORD: yMnE1i6Z27RG6JCah
       DATABASE_URL: postgres.chsgq28yetgt.ap-south-1.rds.amazonaws.com
       DB_PORT: 5432
-    # labels:
-    #   - "traefik.enable=true"
+    labels:
+      - "traefik.enable=true"
       
-    #   # HTTP Router Configuration
-    #   - "traefik.http.routers.vault-router.rule=Host(`datamigration.getpatronus.com`)"
-    #   - "traefik.http.routers.vault-router.entrypoints=websecure"
-    #   - "traefik.http.routers.vault-router.tls=true"
-    #   - "traefik.http.routers.vault-router.tls.certresolver=myresolver"
-    #   - "traefik.http.services.vault-service.loadbalancer.server.port=5000"
+      # HTTP Router Configuration
+      - "traefik.http.routers.vault-router.rule=Host(`datamigration.getpatronus.com`)"
+      - "traefik.http.routers.vault-router.entrypoints=websecure"
+      - "traefik.http.routers.vault-router.tls=true"
+      - "traefik.http.routers.vault-router.tls.certresolver=myresolver"
+      - "traefik.http.services.vault-service.loadbalancer.server.port=5000"
 
-    # networks:
-    #   - traefik_network
+    networks:
+      - traefik_network
 
-# networks:
-#   traefik_network:
-#     external: true
+networks:
+  traefik_network:
+    external: true
