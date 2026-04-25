@@ -29,7 +29,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Personal or professional email addresses',
         'category': Category.PERSONAL,
         'sensitivity': Sensitivity.HIGH,
-        'regex': r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
+        'regex': r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
     },
     {
         'id': 'phone',
@@ -37,7 +37,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Mobile, landline, or fax numbers',
         'category': Category.PERSONAL,
         'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"
+        'regex': r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)"
     },
     {
         'id': 'dob',
@@ -45,7 +45,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Birth date information',
         'category': Category.PERSONAL,
         'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b"
+        'regex': r"(?i)\b(?:dob|date\s*of\s*birth)\s*[:\-]?\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b"
     },
     {
         'id': 'pan',
@@ -61,7 +61,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Unique identification number',
         'category': Category.PERSONAL,
         'sensitivity': Sensitivity.HIGH,
-        'regex': r"\b\d{4}\s?\d{4}\s?\d{4}\b"
+        'regex': r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)"
     },
     {
         'id': 'credit_card',
@@ -77,7 +77,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Card expiry dates',
         'category': Category.FINANCIAL,
         'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"\b(0[1-9]|1[0-2])[/\-](\d{2}|\d{4})\b"
+        'regex': r"(?i)\b(?:exp|expiry|valid\s*thru)\s*[:\-]?\s*(?:0[1-9]|1[0-2])\/\d{2,4}\b"
     },
     {
         'id': 'cvv',
@@ -85,7 +85,7 @@ PII_TYPES: list[PIIType] = [
         'description': 'Card verification value',
         'category': Category.FINANCIAL,
         'sensitivity': Sensitivity.HIGH,
-        'regex': r"\b\d{3,4}\b"
+        'regex': r"(?i)\b(?:cvv|cvc|security\s*code)\s*[:\-]?\s*\d{3}\b"
     },
     {
         'id': 'address',
@@ -93,6 +93,6 @@ PII_TYPES: list[PIIType] = [
         'description': 'Physical addresses',
         'category': Category.PERSONAL,
         'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"\d+\s+\w+(\s+\w+)*\s+(Street|St|Avenue|Ave|Road|Rd)\b"
+        'regex': r"(?i)\b(?:address|addr)\s*[:\-]?\s*[A-Za-z0-9][A-Za-z0-9\s,./#-]{8,}\b"
     }
 ]

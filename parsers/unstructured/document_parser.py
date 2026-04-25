@@ -1,412 +1,383 @@
-from typing import Dict, Any
-from ..base import BaseParser
+from __future__ import annotations
+
+import logging
 import os
 import re
+from typing import Any, Dict
+
+from ..base import BaseParser
+
+logger = logging.getLogger(__name__)
+
+
+# ── DocumentParser ────────────────────────────────────────────────────────────
 
 class DocumentParser(BaseParser):
+    """
+    Parses Word (.docx/.doc), ODT, and RTF documents.
+
+    The text is returned *as-is* from the source.  PII detection and
+    normalisation happen in a separate stage (process_document_content),
+    never inside the parser.
+    """
+
     def parse(self, file_path: str) -> Dict[str, Any]:
         ext = os.path.splitext(file_path)[1].lower()
-        
-        if ext == '.docx':
-            return self._parse_docx(file_path)
-        elif ext == '.doc':
-            return self._parse_doc(file_path)
-        elif ext == '.odt':
-            return self._parse_odt(file_path)
-        elif ext == '.rtf':
-            return self._parse_rtf(file_path)
-        else:
+        dispatch = {
+            ".docx": self._parse_docx,
+            ".doc":  self._parse_doc,
+            ".odt":  self._parse_odt,
+            ".rtf":  self._parse_rtf,
+        }
+        handler = dispatch.get(ext)
+        if handler is None:
             raise ValueError(f"Unsupported document format: {ext}")
-        
+        return handler(file_path)
+
+    def validate(self, data: Dict[str, Any]) -> bool:
+        if not data or "data" not in data:
+            return False
+        if not data.get("data"):
+            return False
+        return all(k in data.get("metadata", {}) for k in ("columns", "rows"))
+
+    # ── Format handlers ───────────────────────────────────────────────────────
+
     def _parse_docx(self, file_path: str) -> Dict[str, Any]:
         import docx
-        
+
         text = ""
         try:
             doc = docx.Document(file_path)
-            text = '\n\n'.join([para.text for para in doc.paragraphs])
-            text = self._preprocess_text(text)
+            text = "\n\n".join(para.text for para in doc.paragraphs)
         except Exception as e:
-            print(f"Error extracting text from DOCX: {str(e)}")
-            
-        data = [{'content': text}]
-        return {
-            'data': data,
-            'metadata': {
-                'columns': ['content'],
-                'rows': 1,
-                'parser': 'docx'
-            }
-        }
-    
+            logger.error("Error extracting text from DOCX: %s", e)
+
+        return self._build_result(text, "docx")
+
     def _parse_doc(self, file_path: str) -> Dict[str, Any]:
         import textract
-        
+
         text = ""
         try:
-            text = textract.process(file_path).decode('utf-8')
-            text = self._preprocess_text(text)
+            text = textract.process(file_path).decode("utf-8")
         except Exception as e:
-            print(f"Error extracting text from DOC: {str(e)}")
-            
-        data = [{'content': text}]
-        return {
-            'data': data,
-            'metadata': {
-                'columns': ['content'],
-                'rows': 1,
-                'parser': 'doc'
-            }
-        }
-    
+            logger.error("Error extracting text from DOC: %s", e)
+
+        return self._build_result(text, "doc")
+
     def _parse_odt(self, file_path: str) -> Dict[str, Any]:
         import odf.opendocument
         from odf.text import P
-        
+
         text = ""
         try:
             doc = odf.opendocument.load(file_path)
-            paragraphs = doc.getElementsByType(P)
-            text = '\n\n'.join([p.getText() for p in paragraphs])
-            text = self._preprocess_text(text)
+            text = "\n\n".join(p.getText() for p in doc.getElementsByType(P))
         except Exception as e:
-            print(f"Error extracting text from ODT: {str(e)}")
-            
-        data = [{'content': text}]
-        return {
-            'data': data,
-            'metadata': {
-                'columns': ['content'],
-                'rows': 1,
-                'parser': 'odt'
-            }
-        }
-    
+            logger.error("Error extracting text from ODT: %s", e)
+
+        return self._build_result(text, "odt")
+
     def _parse_rtf(self, file_path: str) -> Dict[str, Any]:
         import striprtf.striprtf
-        
+
         text = ""
         try:
-            with open(file_path, 'r', errors='ignore') as file:
-                rtf_text = file.read()
-                text = striprtf.striprtf.rtf_to_text(rtf_text)
-                text = self._preprocess_text(text)
+            with open(file_path, "r", errors="replace") as f:
+                text = striprtf.striprtf.rtf_to_text(f.read())
         except Exception as e:
-            print(f"Error extracting text from RTF: {str(e)}")
-            
-        data = [{'content': text}]
+            logger.error("Error extracting text from RTF: %s", e)
+
+        return self._build_result(text, "rtf")
+
+    # ── Shared ────────────────────────────────────────────────────────────────
+
+    def _build_result(self, text: str, parser_name: str) -> Dict[str, Any]:
+        """Return raw text without any mutation."""
         return {
-            'data': data,
-            'metadata': {
-                'columns': ['content'],
-                'rows': 1,
-                'parser': 'rtf'
-            }
+            "data": [{"content": text}],
+            "metadata": {
+                "columns": ["content"],
+                "rows": 1,
+                "parser": parser_name,
+            },
         }
-    
-    def _preprocess_text(self, text: str) -> str:
-        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-        text = re.sub(r'\s+', ' ', text)
-        
-        return self._format_pii(text)
-    
-    def _format_pii(self, text: str) -> str:
-        original_text = text
-        
-        patterns = [
-            {
-                'name': 'credit_card',
-                'pattern': re.compile(r'(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)}",
-                'priority': 1
-            },
-            {
-                'name': 'id_number',
-                'pattern': re.compile(r'(?i)(?:id|identification)[\s\w]*?:?\s*(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
-                'priority': 2
-            },
-            {
-                'name': 'phone',
-                'pattern': re.compile(r'(\d{3})[\s.-]*(\d{3})[\s.-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}",
-                'priority': 3
-            },
-            {
-                'name': 'date',
-                'pattern': re.compile(r'(\d{1,2})[\s.-/]+(\d{1,2})[\s.-/]+(\d{2,4})'),
-                'format': lambda m: f"{m.group(1)}/{m.group(2)}/{m.group(3)}",
-                'priority': 4
-            }
-        ]
-        
-        all_matches = []
-        
-        for pattern_info in patterns:
-            for match in pattern_info['pattern'].finditer(original_text):
-                all_matches.append({
-                    'start': match.start(),
-                    'end': match.end(),
-                    'replacement': pattern_info['format'](match),
-                    'type': pattern_info['name'],
-                    'priority': pattern_info['priority']
-                })
-        
-        conflict_free_matches = []
-        all_matches.sort(key=lambda x: (x['priority'], x['start']))
-        
-        for match in all_matches:
-            overlaps = False
-            for existing in conflict_free_matches:
-                if max(match['start'], existing['start']) < min(match['end'], existing['end']):
-                    overlaps = True
-                    break
-                    
-            if not overlaps:
-                conflict_free_matches.append(match)
-        
-        conflict_free_matches.sort(key=lambda x: x['start'], reverse=True)
-        
-        result = text
-        for match in conflict_free_matches:
-            result = result[:match['start']] + match['replacement'] + result[match['end']:]
-        
-        return result
-    
-    def validate(self, data: Dict[str, Any]) -> bool:
-        if not data or 'data' not in data:
-            return False
-        
-        if not data.get('data') or len(data['data']) == 0:
-            return False
-            
-        required_metadata = ['columns', 'rows']
-        return all(key in data.get('metadata', {}) for key in required_metadata)
-    
+
+
+# ── PDFParser ─────────────────────────────────────────────────────────────────
+
 class PDFParser(BaseParser):
-    def __init__(self, password=None):
-        """Initialize the parser with an optional password for protected PDFs.
-        
-        Args:
-            password (str, optional): Password for protected PDF files.
-        """
+    """
+    Parses PDF files using PyPDF2 for text-layer extraction, with a
+    PaddleOCR fallback that applies cv2 image pre-processing to maximise
+    accuracy on scanned pages.
+
+    The PaddleOCR engine is initialised once in ``__init__`` so the deep-
+    learning models are only loaded a single time regardless of how many
+    pages the document contains.
+
+    Text is returned *verbatim* — no PII normalization inside the parser.
+    """
+
+    # Minimum characters from one variant that means "good enough" —
+    # skip remaining variants once this threshold is met.
+    _MIN_GOOD_CHARS: int = 200
+
+    # DPI used when rasterising PDF pages.  150 is sufficient for OCR and
+    # produces images 4× smaller than 300 DPI, cutting processing time
+    # dramatically on CPU.
+    _OCR_DPI: int = 150
+
+    def __init__(
+        self,
+        password: str | None = None,
+        lang: str = "en",
+    ):
         super().__init__()
         self.password = password
-    
+
+        # Suppress the "checking connectivity" delay on every cold start.
+        import os
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+        # Initialise PaddleOCR once — loading the models is expensive (~2-5 s).
+        # Optimisations vs. original:
+        #   • det_model_name="PP-OCRv5_mobile_det"  — lighter detector (~2× faster)
+        #   • use_doc_orientation_classify=False     — skip rotation classifier
+        #     (scanned receipts are already upright; saves one model inference)
+        #   • use_textline_orientation=False         — same rationale
+        from paddleocr import PaddleOCR  # deferred import
+        self.ocr_engine = PaddleOCR(
+            lang=lang,
+            text_detection_model_name="PP-OCRv5_mobile_det",   # lighter than server_det
+            use_doc_orientation_classify=False,
+            use_textline_orientation=False,
+            use_doc_unwarping=False,
+        )
+
     def parse(self, file_path: str) -> Dict[str, Any]:
-        import PyPDF2
-        import pytesseract
-        from pdf2image import convert_from_path
-        
-        text = self._extract_text_from_pdf(file_path)
-        
+        text = self._extract_text_layer(file_path)
+
+        # If text layer is sparse (scanned PDF), fall back to OCR
         if len(text.strip()) < 100:
-            ocr_text = self._extract_text_from_pdf_images(file_path)
-            
+            logger.info("Text layer sparse — trying OCR for %s", file_path)
+            ocr_text = self._extract_text_via_ocr(file_path)
             if len(ocr_text.strip()) > len(text.strip()):
                 text = ocr_text
-        
-        processed_text = self._preprocess_text(text)
-            
-        data = [{'content': processed_text}]
+
         return {
-            'data': data,
-            'metadata': {
-                'columns': ['content'],
-                'rows': 1,
-                'parser': 'pdf'
-            }
+            "data": [{"content": text}],
+            "metadata": {
+                "columns": ["content"],
+                "rows": 1,
+                "parser": "pdf_paddleocr",
+            },
         }
-    
-    def _preprocess_text(self, text: str) -> str:
-        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-        text = re.sub(r'\s+', ' ', text)
-        
-        return self._format_pii(text)
-    
-    def _format_pii(self, text: str) -> str:
-        original_text = text
-        
-        patterns = [
-            {
-                'name': 'credit_card',
-                'pattern': re.compile(r'(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} {m.group(4)}",
-                'priority': 1
-            },
-            {
-                'name': 'id_number',
-                'pattern': re.compile(r'(?i)(?:id|identification)[\s\w]*?:?\s*(\d{4})[\s-]*(\d{4})[\s-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
-                'priority': 2
-            },
-            {
-                'name': 'phone',
-                'pattern': re.compile(r'(\d{3})[\s.-]*(\d{3})[\s.-]*(\d{4})'),
-                'format': lambda m: f"{m.group(1)}-{m.group(2)}-{m.group(3)}",
-                'priority': 3
-            },
-            {
-                'name': 'date',
-                'pattern': re.compile(r'(\d{1,2})[\s.-/]+(\d{1,2})[\s.-/]+(\d{2,4})'),
-                'format': lambda m: f"{m.group(1)}/{m.group(2)}/{m.group(3)}",
-                'priority': 4
-            }
-        ]
-        
-        all_matches = []
-        
-        for pattern_info in patterns:
-            for match in pattern_info['pattern'].finditer(original_text):
-                all_matches.append({
-                    'start': match.start(),
-                    'end': match.end(),
-                    'replacement': pattern_info['format'](match),
-                    'type': pattern_info['name'],
-                    'priority': pattern_info['priority']
-                })
-        
-        conflict_free_matches = []
-        all_matches.sort(key=lambda x: (x['priority'], x['start']))
-        
-        for match in all_matches:
-            overlaps = False
-            for existing in conflict_free_matches:
-                if max(match['start'], existing['start']) < min(match['end'], existing['end']):
-                    overlaps = True
-                    break
-                    
-            if not overlaps:
-                conflict_free_matches.append(match)
-        
-        conflict_free_matches.sort(key=lambda x: x['start'], reverse=True)
-        
-        result = text
-        for match in conflict_free_matches:
-            result = result[:match['start']] + match['replacement'] + result[match['end']:]
-        
-        return result
-    
-    def _extract_text_from_pdf(self, file_path: str) -> str:
+
+    def validate(self, data: Dict[str, Any]) -> bool:
+        if not data or "data" not in data:
+            return False
+        if not data.get("data"):
+            return False
+        return all(k in data.get("metadata", {}) for k in ("columns", "rows"))
+
+    # ── Text-layer extraction ─────────────────────────────────────────────────
+
+    def _extract_text_layer(self, file_path: str) -> str:
         import PyPDF2
-        
+
         text = ""
         try:
-            try:
-                import Crypto
-            except ImportError:
-                pass
-                
-            with open(file_path, "rb") as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                
-                # Handle password-protected PDFs
-                if pdf_reader.is_encrypted:
-                    # If no password provided, raise an error
+            with open(file_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+
+                if reader.is_encrypted:
                     if not self.password:
                         raise ValueError("PDF is password protected. Password required.")
-                    
-                    try:
-                        # Try to decrypt with the provided password
-                        decrypt_success = pdf_reader.decrypt(self.password)
-                        
-                        # If decryption failed, raise an error
-                        if decrypt_success == 0:  # 0 means wrong password, 1 or 2 means success
-                            raise ValueError("Incorrect PDF password provided.")
-                    except ModuleNotFoundError as e:
-                        if "PyCryptodome" in str(e) or "Crypto" in str(e):
-                            raise ValueError("PyCryptodome is required for decrypting password-protected PDFs. Install with: pip install pycryptodome")
-                        else:
-                            raise e
-                    except Exception as e:
-                        if "PyCryptodome is required" in str(e):
-                            raise ValueError("PyCryptodome is required for decrypting password-protected PDFs. Install with: pip install pycryptodome")
-                        else:
-                            raise e
-                
-                # Now extract text from the PDF
-                for page_num in range(len(pdf_reader.pages)):
-                    page = pdf_reader.pages[page_num]
+                    result = reader.decrypt(self.password)
+                    if result == 0:
+                        raise ValueError("Incorrect PDF password provided.")
+
+                for page in reader.pages:
                     page_text = page.extract_text()
                     if page_text:
                         text += page_text + "\n\n"
+
         except Exception as e:
-            print(f"Error extracting text with PyPDF2: {str(e)}")
-            raise e  # Re-raise the exception to be caught by the main function
-                
+            logger.error("Text-layer extraction failed: %s", e)
+            raise
+
         return text
-    
-    def _extract_text_from_pdf_images(self, file_path: str) -> str:
-        import pytesseract
-        from pdf2image import convert_from_path
-        
-        text = ""
-        try:
-            # For password-protected PDFs, we need to pass the password to convert_from_path
-            if self.password:
-                images = convert_from_path(file_path, dpi=300, userpw=self.password)
-            else:
-                images = convert_from_path(file_path, dpi=300)
-            
-            configs = [
-                '',
-                '--oem 3 --psm 6',
-                '--oem 3 --psm 7 -c tessedit_char_whitelist="0123456789 -/."'
-            ]
-            
-            for i, image in enumerate(images):
-                page_text = ""
-                for config in configs:
-                    version_text = pytesseract.image_to_string(image, config=config)
-                    if version_text and version_text not in page_text:
-                        page_text += version_text + " "
-                
-                text += page_text + "\n\n"
-                
-        except Exception as e:
-            print(f"Error in OCR processing: {str(e)}")
-            
-        return text
-    
-    def _create_processed_images(self, img):
+
+    # ── OCR extraction ────────────────────────────────────────────────────────
+
+    def _extract_text_via_ocr(self, file_path: str) -> str:
+        """
+        Convert each PDF page to an image, apply cv2 preprocessing to produce
+        multiple image variants, run PaddleOCR on every variant, and keep the
+        result with the highest character count.
+
+        CPU optimisations applied:
+          1. Lower DPI (150 vs 300) — images are 4× smaller.
+          2. Short-circuit variant loop — stop as soon as a variant yields
+             >= _MIN_GOOD_CHARS characters (skips remaining preprocessing).
+          3. Parallel page processing — pages are OCR'd concurrently using
+             a ThreadPoolExecutor (safe: the engine is stateless per predict
+             call; GIL is released during native inference).
+        """
         import cv2
         import numpy as np
-        
-        processed_images = []
-        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from pdf2image import convert_from_path
+
         try:
-            processed_images.append(img)
-            
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            processed_images.append(gray)
-            
-            _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            processed_images.append(thresh1)
-            
-            thresh2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            processed_images.append(thresh2)
-            
-            denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
-            processed_images.append(denoised)
-            
-            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-            sharpened = cv2.filter2D(gray, -1, kernel)
-            processed_images.append(sharpened)
-            
-            resized = cv2.resize(gray, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
-            processed_images.append(resized)
-            
+            images = (
+                convert_from_path(file_path, dpi=self._OCR_DPI, userpw=self.password)
+                if self.password
+                else convert_from_path(file_path, dpi=self._OCR_DPI)
+            )
         except Exception as e:
-            print(f"Error in image processing: {str(e)}")
-            
-        return processed_images
-        
-    def validate(self, data: Dict[str, Any]) -> bool:
-        if not data or 'data' not in data:
-            return False
-        
-        if not data.get('data') or len(data['data']) == 0:
-            return False
-            
-        required_metadata = ['columns', 'rows']
-        return all(key in data.get('metadata', {}) for key in required_metadata)
+            logger.error("pdf2image conversion failed: %s", e)
+            return ""
+
+        def _process_page(page_num: int, pil_image) -> str:
+            """OCR a single page, short-circuiting once enough text found."""
+            img_np = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            return self._extract_text_from_image_array(img_np, page_num)
+
+        # Use up to 4 worker threads (I/O + native code releases the GIL).
+        page_texts: dict[int, str] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {
+                pool.submit(_process_page, i, img): i
+                for i, img in enumerate(images)
+            }
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    page_texts[page_num] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("OCR failed on page %d: %s", page_num, exc)
+                    page_texts[page_num] = ""
+
+        # Reassemble in original page order.
+        return "\n\n".join(page_texts[i] for i in sorted(page_texts))
+
+    def _extract_text_from_image_array(self, img_np: "np.ndarray", page_num: int = 0) -> str:
+        """
+        OCR a single OpenCV image array and return the best variant output.
+        """
+        variants = self._preprocess_image(img_np)
+        best = ""
+
+        for idx, img_variant in enumerate(variants, start=1):
+            candidate = self._run_paddle_ocr(img_variant, page_num)
+            if len(candidate.strip()) > len(best.strip()):
+                best = candidate
+
+            if len(best.strip()) >= self._MIN_GOOD_CHARS:
+                logger.debug(
+                    "Page %d: good result after %d variant(s), skipping rest.",
+                    page_num, idx,
+                )
+                break
+
+        return best
+
+    def _run_paddle_ocr(self, img: "np.ndarray", page_num: int = 0) -> str:
+        """
+        Run PaddleOCR on a single numpy image array and stitch the recognised
+        text lines into a plain string.
+
+        PaddleOCR v3 API:
+            engine.predict(img) → generator of OCRResult objects.
+            Each OCRResult is a dict-like object with keys:
+                'rec_texts'  – list[str]  recognised text lines
+                'rec_scores' – list[float] confidence per line
+        """
+        try:
+            results = list(self.ocr_engine.predict(img))
+            if not results:
+                return ""
+
+            lines = []
+            for ocr_result in results:
+                texts = ocr_result.get("rec_texts", [])
+                lines.extend(t for t in texts if t and t.strip())
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.debug("PaddleOCR failed on page %d: %s", page_num, e)
+            return ""
+
+
+    def _preprocess_image(self, img_np: "np.ndarray") -> list:
+        """
+        Apply a battery of cv2 transforms to a BGR numpy image and return
+        all variants as numpy arrays (PaddleOCR's native input format).
+
+        The caller passes a BGR numpy array (converted from PIL upstream).
+        The first variant is always the original image so we never drop the
+        baseline result even if all preprocessing steps fail.
+        """
+        import cv2
+        import numpy as np
+
+        variants = [img_np]  # baseline — original BGR image
+
+        try:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+
+            # Otsu binarisation — best for high-contrast printed text
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Adaptive Gaussian threshold — handles uneven lighting / shadows
+            adaptive = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+            )
+
+            # Fast non-local means denoising — reduces scanner noise
+            denoised = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+
+            # Sharpening kernel — improves soft / slightly blurred scans
+            kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+            sharpened = cv2.filter2D(gray, -1, kernel)
+
+            # 2× upscale — significantly helps OCR on small-font documents
+            upscaled = cv2.resize(
+                gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
+            )
+
+            # PaddleOCR accepts numpy arrays directly — no PIL conversion needed
+            variants.extend([otsu, adaptive, denoised, sharpened, upscaled])
+
+        except Exception as e:
+            logger.warning("cv2 preprocessing failed — using raw image only: %s", e)
+
+        return variants
+
+
+class ImageParser(PDFParser):
+    """
+    OCR parser for standalone image files (JPG/PNG/BMP/TIFF/WEBP).
+    Reuses the same PaddleOCR + preprocessing pipeline as PDFParser.
+    """
+
+    def parse(self, file_path: str) -> Dict[str, Any]:
+        import cv2
+
+        img_np = cv2.imread(file_path)
+        if img_np is None:
+            raise ValueError(f"Unable to read image file '{file_path}'. File may be unreadable or corrupt.")
+
+        text = self._extract_text_from_image_array(img_np, page_num=0)
+        return {
+            "data": [{"content": text}],
+            "metadata": {
+                "columns": ["content"],
+                "rows": 1,
+                "parser": "image_paddleocr",
+            },
+        }
