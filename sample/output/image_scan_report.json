@@ -1,0 +1,179 @@
+[
+  {
+    "filename": "1560025797-1707.jpg",
+    "status": "success",
+    "ocr": {
+      "char_count": 283
+    },
+    "pii": [
+      {
+        "type": "PAN",
+        "value": "BVLPB1329N",
+        "confidence": 1.0,
+        "start": 273,
+        "end": 283,
+        "source": "regex"
+      },
+      {
+        "type": "ORG",
+        "value": "Bhanderi Ankit",
+        "confidence": 0.85,
+        "start": 50,
+        "end": 64,
+        "source": "presidio"
+      }
+    ],
+    "summary": {
+      "counts": {
+        "pan": 1,
+        "organization": 1
+      },
+      "primary_type": "pan"
+    }
+  },
+  {
+    "filename": "1560051614-9920.jpg",
+    "status": "success",
+    "ocr": {
+      "char_count": 163
+    },
+    "pii": [
+      {
+        "type": "PAN",
+        "value": "AQDPP0397G",
+        "confidence": 1.0,
+        "start": 35,
+        "end": 45,
+        "source": "regex"
+      },
+      {
+        "type": "PERSON",
+        "value": "FaHTST GOVT.OFINDL",
+        "confidence": 0.85,
+        "start": 131,
+        "end": 150,
+        "source": "presidio"
+      }
+    ],
+    "summary": {
+      "counts": {
+        "pan": 1,
+        "name": 1
+      },
+      "primary_type": "pan"
+    }
+  },
+  {
+    "filename": "1560052975-3951.jpg",
+    "status": "success",
+    "ocr": {
+      "char_count": 297
+    },
+    "pii": [
+      {
+        "type": "PERSON",
+        "value": "Patel Rajendrakumar",
+        "confidence": 0.85,
+        "start": 190,
+        "end": 209,
+        "source": "presidio"
+      }
+    ],
+    "summary": {
+      "counts": {
+        "name": 1
+      },
+      "primary_type": "name"
+    }
+  },
+  {
+    "filename": "1560077954-1976.jpg",
+    "status": "success",
+    "ocr": {
+      "char_count": 193
+    },
+    "pii": [
+      {
+        "type": "ORG",
+        "value": "IDENTITY CARD",
+        "confidence": 0.85,
+        "start": 49,
+        "end": 62,
+        "source": "presidio"
+      },
+      {
+        "type": "ORG",
+        "value": "ON MI AIame",
+        "confidence": 0.85,
+        "start": 155,
+        "end": 166,
+        "source": "presidio"
+      },
+      {
+        "type": "VOTER_ID",
+        "value": "LDN2989101",
+        "confidence": 0.8,
+        "start": 63,
+        "end": 73,
+        "source": "presidio"
+      }
+    ],
+    "summary": {
+      "counts": {
+        "organization": 2,
+        "voter_id": 1
+      },
+      "primary_type": "voter_id"
+    }
+  },
+  {
+    "filename": "1560086364-3094.jpg",
+    "status": "success",
+    "ocr": {
+      "char_count": 399
+    },
+    "pii": [
+      {
+        "type": "DOB",
+        "value": "DOB:24/04/1994",
+        "confidence": 1.0,
+        "start": 272,
+        "end": 286,
+        "source": "regex"
+      },
+      {
+        "type": "AADHAAR",
+        "value": "740157326476",
+        "confidence": 1.0,
+        "start": 315,
+        "end": 327,
+        "source": "regex"
+      },
+      {
+        "type": "PERSON",
+        "value": "Near Hanumanji",
+        "confidence": 0.85,
+        "start": 146,
+        "end": 160,
+        "source": "presidio"
+      },
+      {
+        "type": "ORG",
+        "value": "Aadhaar-Aam Admi",
+        "confidence": 0.85,
+        "start": 341,
+        "end": 357,
+        "source": "presidio"
+      }
+    ],
+    "summary": {
+      "counts": {
+        "dob": 1,
+        "aadhaar": 1,
+        "name": 1,
+        "organization": 1
+      },
+      "primary_type": "aadhaar"
+    }
+  }
+]

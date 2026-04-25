@@ -61,7 +61,8 @@ This repository currently exposes HTTP APIs for schema inspection, PII scanning,
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml                 # Poetry dependencies
-└── pii_scans.db                   # Local SQLite DB (development)
+├── pii_scans.db                   # Local SQLite DB (development)
+└── tests/                         # Standalone test scripts (OCR, PDF parsing, LLM baseline)
 ```
 
 ## Supported Sources And Formats
@@ -123,7 +124,8 @@ In `db_utils.py`:
 - Document/PDF/SQL text: scans combined text content for regex hits.
 - PDF parser flow:
   - extract text with `PyPDF2`,
-  - fallback OCR (`pdf2image` + `pytesseract`) when extracted text is sparse.
+  - fallback OCR (`pdf2image` + `PaddleOCR`) when extracted text is sparse.
+  - Hybrid NLP scanning (Regex + Microsoft Presidio) to produce detailed Vault-ready JSON payloads.
 
 ## Data Model (Internal Scan DB)
 
@@ -176,7 +178,6 @@ Migration file: `migrations/versions/a0446fa2e830_initial_migration.py`.
 - Poetry `1.7+`
 - OS libraries for PDF OCR:
   - Poppler (`pdf2image`)
-  - Tesseract OCR
 
 ### Install
 ```bash
@@ -387,7 +388,7 @@ Response includes:
 - Encrypted PDF fails:
   - Install `pycryptodome` and pass `password` in `/scan-file`.
 - OCR not working:
-  - Ensure Poppler and Tesseract are installed and available in PATH.
+  - Ensure Poppler is installed and available in PATH. PaddleOCR runs natively via Python packages.
 - MDB parsing fails:
   - Ensure MS Access ODBC driver is installed on host/container.
 - Migration issues:
