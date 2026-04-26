@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from constants import PII_TYPES, PIIType
 from database import get_db
 from db_utils import connect_to_db
-from models import ColumnScan, Scan, ScanAnomaly
+from models import ColumnScan, PIILocation, Scan, ScanAnomaly
 from schemas import ScanDatabaseRequest
 from services.pii_service import detect_pii, select_primary_pii
 
@@ -162,6 +162,83 @@ def process_document_content(
                     column_scan=column_scan,
                 )
             )
+
+    return column_scan
+
+
+def process_image_content(
+    session: Session,
+    scan: Scan,
+    source_file: str,
+    best_text: str,
+    lines: list,
+    pii_types: List[PIIType],
+):
+    """
+    Process OCR output from an image file.
+
+    *best_text* — high-quality text from the multi-variant OCR pass, used for
+    PII detection.
+
+    *lines* — list of (text, bbox) pairs from a raw-image OCR pass where bbox
+    is [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] in original image pixels. Used only
+    for bounding-box lookup; not for detection.
+
+    Bbox matching is done by searching each PII match value inside the raw OCR
+    line texts (substring search, case-insensitive). This is robust to the two
+    OCR passes producing slightly different tokenisation.
+    """
+    import json
+
+    selected_ids = {p["id"] for p in pii_types}
+
+    result = detect_pii(best_text, use_nlp=True)
+    filtered = [m for m in result.matches if not selected_ids or m.pii_type in selected_ids]
+
+    pii_counts: dict = defaultdict(int)
+    for m in filtered:
+        pii_counts[m.pii_type] += 1
+
+    primary_type, primary_count, _ = select_primary_pii(filtered, allowed_types=selected_ids)
+
+    column_scan = ColumnScan(
+        db_name=source_file,
+        table_name="image",
+        column_name="content",
+        total_rows=1,
+        primary_pii_type=primary_type,
+        primary_pii_match_count=primary_count,
+        scan=scan,
+    )
+    session.add(column_scan)
+    session.flush()
+
+    for pii_id, count in pii_counts.items():
+        if pii_id != primary_type and count > 0:
+            confidence = min(count / max(len(best_text.split()), 1), 1.0)
+            session.add(ScanAnomaly(
+                pii_type=pii_id,
+                match_count=count,
+                confidence_score=round(confidence, 4),
+                column_scan=column_scan,
+            ))
+
+    # Scan each raw OCR line individually with regex to find ALL PII occurrences.
+    # This correctly handles: duplicate values (same Aadhaar twice), multiple
+    # PII types on different lines, and values that were deduplicated in the
+    # full-text pass but appear on distinct lines with distinct bboxes.
+    for line_text, bbox in lines:
+        line_result = detect_pii(line_text, use_nlp=False)
+        for m in line_result.matches:
+            if not selected_ids or m.pii_type in selected_ids:
+                session.add(PIILocation(
+                    scan_id=scan.id,
+                    column_scan_id=column_scan.id,
+                    pii_type=m.pii_type,
+                    value=m.value,
+                    bbox=json.dumps(bbox),
+                    source_file=source_file,
+                ))
 
     return column_scan
 

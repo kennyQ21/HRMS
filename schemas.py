@@ -70,6 +70,14 @@ class ScanDatabaseRequest(DBConnectionBase):
     realm_name: Optional[str] = None
 
 
+# ── /redact ───────────────────────────────────────────────────────────────────
+
+class RedactRequest(BaseModel):
+    scan_id: int
+    filenames: List[str]
+    pii_types: List[str]
+
+
 # ── Standardised API response wrapper ────────────────────────────────────────
 
 class APIResponse(BaseModel):

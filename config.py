@@ -1,4 +1,7 @@
 import os
+import pathlib
+
+UPLOADS_DIR = pathlib.Path(os.getenv("UPLOADS_DIR", "uploads"))
 
 class Config:
     FLASK_ENV = os.getenv('FLASK_ENV', 'development')

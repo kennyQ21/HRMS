@@ -29,8 +29,9 @@ pypdf2>=3.0.1
 pycryptodome>=3.22.0
 # pytesseract replaced by PaddleOCR for better accuracy & multilingual support
 # For GPU support swap 'paddlepaddle' with 'paddlepaddle-gpu'
-paddlepaddle>=2.6.0
-paddleocr>=2.7.0
+paddlepaddle==3.2.2
+paddleocr>=3.3.2
+numpy==1.26.4
 pillow>=10.0.0          # runtime dep for paddleocr image loading
 pdf2image>=1.17.0
 pypandoc>=1.15
@@ -41,6 +42,9 @@ opencv-python>=4.11.0.86
 py7zr>=0.22.0
 rarfile>=4.2
 patool
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+PyJWT>=2.8.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.1

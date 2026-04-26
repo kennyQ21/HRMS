@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
+from config import UPLOADS_DIR
 from constants import PII_TYPES
 from database import get_db
 from models import Scan
@@ -26,7 +27,7 @@ from parsers.structured.excel_parser import ExcelParser
 from parsers.unstructured.access_parser import MDBParser
 from parsers.unstructured.document_parser import DocumentParser, ImageParser, PDFParser
 from parsers.unstructured.sql_parser import SQLParser
-from routers.scans import process_column_data, process_document_content
+from routers.scans import process_column_data, process_document_content, process_image_content
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +66,31 @@ def _get_parser(filename: str, password: str | None):
     return None
 
 
+def _save_image_for_redaction(src_path: str, scan_id: int, filename: str) -> None:
+    """Copy the original image into uploads/<scan_id>/<filename> for later redaction."""
+    import shutil
+    dest_dir = UPLOADS_DIR / str(scan_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_path, dest_dir / os.path.basename(filename))
+
+
+def _parse_image_with_boxes(parser: ImageParser, file_path: str) -> dict:
+    """Call parse_with_boxes so we get bbox data alongside text."""
+    return parser.parse_with_boxes(file_path)
+
+
 def _process_parsed(db: Session, scan: Scan, filename: str, parsed_data: dict, connector_id: str):
     """Dispatch parsed data to the right column/document processing function."""
     fn = filename.lower()
 
-    if fn.endswith((".pdf", ".docx", ".doc", ".odt", ".rtf", *IMAGE_EXTENSIONS)):
+    if fn.endswith(IMAGE_EXTENSIONS) and "lines" in parsed_data:
+        # Images: use bbox-aware processor so /redact can work later.
+        # Pass best-quality text separately from raw-image bbox lines.
+        best_text = parsed_data["data"][0].get("content", "")
+        process_image_content(
+            db, scan, os.path.basename(filename), best_text, parsed_data["lines"], PII_TYPES
+        )
+    elif fn.endswith((".pdf", ".docx", ".doc", ".odt", ".rtf", *IMAGE_EXTENSIONS)):
         text_content = parsed_data["data"][0].get("content", "")
         process_document_content(
             db, scan, connector_id, os.path.basename(filename), text_content, PII_TYPES
@@ -173,7 +194,11 @@ def _scan_file_blocking(
                             continue
 
                         try:
-                            parsed_data = parser.parse(extracted_path)
+                            is_image = extracted_file.lower().endswith(IMAGE_EXTENSIONS)
+                            if is_image:
+                                parsed_data = _parse_image_with_boxes(parser, extracted_path)
+                            else:
+                                parsed_data = parser.parse(extracted_path)
                             if not parser.validate(parsed_data):
                                 all_results.append(
                                     {"filename": extracted_file, "status": "error", "error": "Invalid file structure"}
@@ -181,6 +206,8 @@ def _scan_file_blocking(
                                 continue
 
                             _process_parsed(db, scan, extracted_file, parsed_data, f"{extracted_file.rsplit('.',1)[-1]}_parser")
+                            if is_image:
+                                _save_image_for_redaction(extracted_path, scan.id, extracted_file)
                             all_results.append(
                                 {"filename": extracted_file, "status": "success", "metadata": parsed_data["metadata"]}
                             )
@@ -209,11 +236,17 @@ def _scan_file_blocking(
                 return {"status": "error", "message": "Unsupported file format"}
 
             try:
-                parsed_data = parser.parse(temp_path)
+                is_image = filename_lower.endswith(IMAGE_EXTENSIONS)
+                if is_image:
+                    parsed_data = _parse_image_with_boxes(parser, temp_path)
+                else:
+                    parsed_data = parser.parse(temp_path)
                 if not parser.validate(parsed_data):
                     raise ValueError("Invalid file structure")
 
                 _process_parsed(db, scan, original_filename, parsed_data, f"{filename_lower.rsplit('.',1)[-1]}_parser")
+                if is_image:
+                    _save_image_for_redaction(temp_path, scan.id, original_filename)
                 all_results.append(
                     {"filename": original_filename, "status": "success", "metadata": parsed_data["metadata"]}
                 )

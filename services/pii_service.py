@@ -74,7 +74,6 @@ class PIIResult:
 
 _INTERNAL_TO_ENTITY_TYPE: dict[str, str] = {
     "name": "PERSON",
-    "organization": "ORGANIZATION",
     "address": "LOCATION",
     "pan": "PAN",
     "aadhaar": "AADHAAR",
@@ -86,8 +85,6 @@ _INTERNAL_TO_ENTITY_TYPE: dict[str, str] = {
     "expiry": "EXPIRY",
     "cvv": "CVV",
     "ip_address": "IP_ADDRESS",
-    "iban": "IBAN_CODE",
-    "ssn": "US_SSN",
 }
 
 
@@ -101,10 +98,7 @@ _PRESIDIO_TO_INTERNAL: dict[str, str] = {
     "PHONE_NUMBER":  "phone",       # keep — Presidio is better at intl formats
     "CREDIT_CARD":   "credit_card",
     "LOCATION":      "address",
-    "ORGANIZATION":  "organization",
     "IP_ADDRESS":    "ip_address",
-    "IBAN_CODE":     "iban",
-    "US_SSN":        "ssn",
     # India-specific — added via custom recognizers below
     "IN_PAN":        "pan",
     "IN_AADHAAR":    "aadhaar",
@@ -117,13 +111,12 @@ _MIN_SCORE: float = 0.50
 _PRESIDIO_MIN_SCORE_BY_TYPE: dict[str, float] = {
     "name": 0.65,
     "address": 0.60,
-    "organization": 0.60,
     "phone": 0.50,
     "email": 0.50,
 }
 
 # When NLP is enabled, prefer Presidio for these weak/ambiguous free-text types.
-_PRESIDIO_PREFERRED_TYPES: set[str] = {"address", "name", "organization"}
+_PRESIDIO_PREFERRED_TYPES: set[str] = {"address", "name"}
 
 _DEDUPE_BY_VALUE_TYPES: set[str] = {
     "aadhaar",
@@ -133,7 +126,6 @@ _DEDUPE_BY_VALUE_TYPES: set[str] = {
     "credit_card",
     "voter_id",
     "name",
-    "organization",
     "address",
 }
 
@@ -146,7 +138,6 @@ _PII_PRIORITY: dict[str, int] = {
     "email": 8,
     "address": 6,
     "name": 3,
-    "organization": 2,
     "expiry": 2,
     "dob": 2,
     "cvv": 1,
@@ -358,20 +349,6 @@ def _detect_with_presidio(
                 "aadhaar", "card", "uid",
             }
             if any(token in disallowed for token in tokens):
-                return True
-            return False
-
-        if pii_type == "organization":
-            org_keywords = (
-                "government", "department", "authority", "commission", "ministry",
-                "bank", "insurance", "corporation", "limited", "ltd", "inc",
-                "university", "of india", "india",
-            )
-            has_keyword = any(keyword in lowered for keyword in org_keywords)
-            alpha_tokens = [t for t in re.findall(r"[A-Za-z]+", normalized)]
-            if not has_keyword and len(alpha_tokens) < 2:
-                return True
-            if normalized.isupper() and len(normalized) <= 4:
                 return True
             return False
 

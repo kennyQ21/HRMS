@@ -154,6 +154,7 @@ class PDFParser(BaseParser):
             use_doc_orientation_classify=False,
             use_textline_orientation=False,
             use_doc_unwarping=False,
+            enable_mkldnn=False,  # prevents OneDNN/PIR crash on CPU (paddlepaddle 3.3.x bug)
         )
 
     def parse(self, file_path: str) -> Dict[str, Any]:
@@ -285,6 +286,35 @@ class PDFParser(BaseParser):
 
         return best
 
+    def _run_paddle_ocr_with_boxes(self, img: "np.ndarray", page_num: int = 0):
+        """
+        Run OCR on *img* and return (full_text, lines).
+
+        lines is a list of (text, bbox) where bbox is a list of 4 [x, y] points
+        in the coordinate space of *img* (i.e. the original, un-preprocessed image).
+        Always uses the original image so bounding boxes map directly to pixels.
+        """
+        try:
+            results = list(self.ocr_engine.predict(img))
+            if not results:
+                return "", []
+
+            lines = []
+            for ocr_result in results:
+                texts = ocr_result.get("rec_texts", [])
+                polys = ocr_result.get("dt_polys", [])
+                for text, poly in zip(texts, polys):
+                    if text and text.strip():
+                        bbox = poly.tolist() if hasattr(poly, "tolist") else list(poly)
+                        lines.append((text.strip(), bbox))
+
+            full_text = "\n".join(t for t, _ in lines)
+            return full_text, lines
+
+        except Exception as e:
+            logger.debug("PaddleOCR with boxes failed on page %d: %s", page_num, e)
+            return "", []
+
     def _run_paddle_ocr(self, img: "np.ndarray", page_num: int = 0) -> str:
         """
         Run PaddleOCR on a single numpy image array and stitch the recognised
@@ -375,6 +405,43 @@ class ImageParser(PDFParser):
         text = self._extract_text_from_image_array(img_np, page_num=0)
         return {
             "data": [{"content": text}],
+            "metadata": {
+                "columns": ["content"],
+                "rows": 1,
+                "parser": "image_paddleocr",
+            },
+        }
+
+    def parse_with_boxes(self, file_path: str) -> Dict[str, Any]:
+        """
+        Like parse() but also returns per-line bounding boxes on the original image.
+
+        Two separate OCR passes are made deliberately:
+          1. Multi-variant pass (_extract_text_from_image_array) — uses preprocessing
+             pipelines (grayscale, Otsu, adaptive threshold, upscale …) to produce
+             the highest-quality text for PII detection.
+          2. Raw-image pass (_run_paddle_ocr_with_boxes) — runs on the unmodified
+             original so that bbox pixel coordinates map directly to the stored image
+             for redaction without any coordinate scaling.
+
+        PII matching against boxes is done by value search (not char-span) in
+        process_image_content, so the two passes don't need to be character-aligned.
+        """
+        import cv2
+
+        img_np = cv2.imread(file_path)
+        if img_np is None:
+            raise ValueError(f"Unable to read image file '{file_path}'.")
+
+        # Pass 1: best quality text (preprocessing variants)
+        best_text = self._extract_text_from_image_array(img_np, page_num=0)
+
+        # Pass 2: raw image for accurate bbox coords
+        _, lines = self._run_paddle_ocr_with_boxes(img_np, page_num=0)
+
+        return {
+            "data": [{"content": best_text}],
+            "lines": lines,
             "metadata": {
                 "columns": ["content"],
                 "rows": 1,

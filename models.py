@@ -44,6 +44,11 @@ class ColumnScan(Base):
         "ScanAnomaly", back_populates="column_scan", cascade="all, delete-orphan"
     )
 
+    # One-to-many: ColumnScan → PIILocation (image bbox data)
+    pii_locations = relationship(
+        "PIILocation", back_populates="column_scan", cascade="all, delete-orphan"
+    )
+
 
 class ScanAnomaly(Base):
     __tablename__ = "scan_anomalies"
@@ -56,3 +61,20 @@ class ScanAnomaly(Base):
 
     # Relationship with parent scan
     column_scan = relationship("ColumnScan", back_populates="anomalies")
+
+
+class PIILocation(Base):
+    """Bounding-box record for a single PII match found in an image."""
+    __tablename__ = "pii_locations"
+
+    id = Column(Integer, primary_key=True)
+    scan_id = Column(Integer, ForeignKey("scans.id"), nullable=False)
+    column_scan_id = Column(Integer, ForeignKey("column_scans.id"), nullable=False)
+    pii_type = Column(String, nullable=False)
+    value = Column(String)
+    # JSON-encoded polygon: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+    bbox = Column(String, nullable=False)
+    # Original filename so the redaction endpoint knows which stored image to open
+    source_file = Column(String, nullable=False)
+
+    column_scan = relationship("ColumnScan", back_populates="pii_locations")

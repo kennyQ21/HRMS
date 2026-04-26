@@ -7,11 +7,13 @@ Replaces the Flask app.py.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from auth import verify_token
+from config import UPLOADS_DIR
 from database import Base, engine
-from routers import connections, data, files, scans
+from routers import connections, data, files, redact, scans
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -27,6 +29,8 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up — ensuring DB tables exist...")
     Base.metadata.create_all(bind=engine)
     logger.info("DB tables ready.")
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Uploads directory ready: %s", UPLOADS_DIR.resolve())
     yield
     logger.info("Shutting down.")
 
@@ -40,6 +44,7 @@ app = FastAPI(
     ),
     version="2.0.0",
     lifespan=lifespan,
+    dependencies=[Depends(verify_token)],
 )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
@@ -56,6 +61,7 @@ app.include_router(connections.router)
 app.include_router(data.router)
 app.include_router(scans.router)
 app.include_router(files.router)
+app.include_router(redact.router)
 
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────
