@@ -392,8 +392,8 @@ async def get_scans(realm_name: Optional[str] = None, db: Session = Depends(get_
             for s in scans
         ]
 
-        return {"status": "success", "data": {"scans": scans_list, "total": len(scans_list)}}
+        return {"total": len(scans_list), "scans": scans_list}
 
     except Exception as exc:
         logger.exception("get_scans error")
-        return {"status": "error", "message": str(exc)}
+        return {"total": 0, "scans": [], "error": str(exc)}

@@ -16,7 +16,6 @@ class Scan(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
     )
-
     # One-to-many: Scan → ColumnScan
     column_scans = relationship(
         "ColumnScan", back_populates="scan", cascade="all, delete-orphan"

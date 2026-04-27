@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth import verify_token
 from config import UPLOADS_DIR
 from database import Base, engine
-from routers import connections, data, files, redact, scans
+from routers import connections, data, dashboard, files, redact, scan_connector, scans
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -62,6 +62,8 @@ app.include_router(data.router)
 app.include_router(scans.router)
 app.include_router(files.router)
 app.include_router(redact.router)
+app.include_router(scan_connector.router)
+app.include_router(dashboard.router)
 
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────
