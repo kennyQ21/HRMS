@@ -136,7 +136,6 @@ class PDFParser(BaseParser):
     def __init__(
         self,
         password: str | None = None,
-        lang: str = "en",
     ):
         super().__init__()
         self.password = password
@@ -146,15 +145,17 @@ class PDFParser(BaseParser):
         os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
         # Initialise PaddleOCR once — loading the models is expensive (~2-5 s).
-        # Optimisations vs. original:
-        #   • det_model_name="PP-OCRv5_mobile_det"  — lighter detector (~2× faster)
-        #   • use_doc_orientation_classify=False     — skip rotation classifier
-        #     (scanned receipts are already upright; saves one model inference)
-        #   • use_textline_orientation=False         — same rationale
+        #
+        # Both models are pinned to their *mobile* variants:
+        #   • When text_detection_model_name is set, PaddleOCR ignores `lang`
+        #     and defaults the recognition model to PP-OCRv5_server_rec (~80 MB).
+        #     That model's native loader segfaults (SIGSEGV) on memory-constrained
+        #     containers.  Pinning to PP-OCRv5_mobile_rec (~5 MB) avoids the crash.
+        #   • mobile_det + mobile_rec together load ~3× faster and use far less RAM.
         from paddleocr import PaddleOCR  # deferred import
         self.ocr_engine = PaddleOCR(
-            lang=lang,
-            text_detection_model_name="PP-OCRv5_mobile_det",   # lighter than server_det
+            text_detection_model_name="PP-OCRv5_mobile_det",
+            text_recognition_model_name="PP-OCRv5_mobile_rec",
             use_doc_orientation_classify=False,
             use_textline_orientation=False,
             use_doc_unwarping=False,
