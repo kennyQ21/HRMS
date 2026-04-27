@@ -50,7 +50,12 @@ def _run_ocr_subprocess(
             timeout=timeout,
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            return json.loads(proc.stdout.strip())
+            results = json.loads(proc.stdout.strip())
+            # Log any per-image errors the worker caught internally
+            for img, r in zip(img_paths, results):
+                if r.get("error"):
+                    logger.error("OCR worker error for %s: %s", img, r["error"])
+            return results
         # Non-zero exit = crash or error; log stderr for diagnostics
         logger.error(
             "OCR worker exited %d — images: %s\nstderr: %s",
