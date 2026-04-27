@@ -310,6 +310,10 @@ class ImageParser(PDFParser):
         text = data.get("text", "")
         # Worker returns [[text_str, bbox_poly], ...]; convert to (text, bbox) tuples.
         lines = [(t, b) for t, b in data.get("lines", [])]
+        logger.info(
+            "OCR result for %s: %d chars, %d lines — preview: %r",
+            file_path, len(text), len(lines), text[:120],
+        )
         return {
             "data": [{"content": text}],
             "lines": lines,
