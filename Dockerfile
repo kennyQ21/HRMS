@@ -21,6 +21,10 @@ COPY requirements.txt ./
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download EasyOCR models (craft detection + english recognition, ~150 MB total)
+# so the first OCR request doesn't trigger a runtime download that can OOM-kill the worker.
+RUN python -c "import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False)"
+
 COPY . ./
 
 EXPOSE 5000
