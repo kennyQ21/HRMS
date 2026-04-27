@@ -101,37 +101,49 @@ async def redact_images(body: RedactRequest, db: Session = Depends(get_db)):
     for loc in locations:
         by_file[loc.source_file].append(loc)
 
-    zip_buf = io.BytesIO()
-    redacted_count = 0
+    redacted: dict[str, bytes] = {}
     skipped: list[str] = []
 
-    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for filename, file_locs in by_file.items():
-            img_path = UPLOADS_DIR / str(body.scan_id) / filename
-            if not img_path.exists():
-                logger.warning(
-                    "Stored image not found: %s — skipping (was it scanned with an older version?)",
-                    img_path,
-                )
-                skipped.append(filename)
-                continue
+    for filename, file_locs in by_file.items():
+        img_path = UPLOADS_DIR / str(body.scan_id) / filename
+        if not img_path.exists():
+            logger.warning(
+                "Stored image not found: %s — skipping (was it scanned with an older version?)",
+                img_path,
+            )
+            skipped.append(filename)
+            continue
 
-            try:
-                redacted_bytes = _redact_image(str(img_path), file_locs)
-                zf.writestr(f"redacted_{filename}", redacted_bytes)
-                redacted_count += 1
-                logger.info(
-                    "Redacted %d region(s) in %s", len(file_locs), filename
-                )
-            except Exception as exc:
-                logger.error("Failed to redact %s: %s", filename, exc)
-                skipped.append(filename)
+        try:
+            redacted[filename] = _redact_image(str(img_path), file_locs)
+            logger.info("Redacted %d region(s) in %s", len(file_locs), filename)
+        except Exception as exc:
+            logger.error("Failed to redact %s: %s", filename, exc)
+            skipped.append(filename)
 
-    if redacted_count == 0:
+    if not redacted:
         raise HTTPException(
             status_code=500,
             detail="Redaction failed: stored image files could not be found or processed.",
         )
+
+    # Single file → return raw blob with correct image content type
+    if len(redacted) == 1:
+        filename, img_bytes = next(iter(redacted.items()))
+        ext = filename.rsplit(".", 1)[-1].lower()
+        media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+        headers = {
+            "Content-Disposition": f'attachment; filename="redacted_{filename}"',
+        }
+        if skipped:
+            headers["X-Redaction-Skipped"] = json.dumps(skipped)
+        return StreamingResponse(io.BytesIO(img_bytes), media_type=media_type, headers=headers)
+
+    # Multiple files → ZIP
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, img_bytes in redacted.items():
+            zf.writestr(f"redacted_{filename}", img_bytes)
 
     zip_buf.seek(0)
     headers = {
