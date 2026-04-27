@@ -129,6 +129,10 @@ class PDFParser(BaseParser):
     # dramatically on CPU.
     _OCR_DPI: int = 150
 
+    # PaddleOCR segfaults on images with max side > 4000 px (SIGSEGV in its
+    # internal resize).  Pre-resize to this limit before every predict() call.
+    _MAX_OCR_SIDE: int = 3000
+
     def __init__(
         self,
         password: str | None = None,
@@ -286,6 +290,25 @@ class PDFParser(BaseParser):
 
         return best
 
+    def _resize_for_ocr(self, img: "np.ndarray"):
+        """
+        Resize *img* so its longest side ≤ _MAX_OCR_SIDE.
+
+        Returns (resized_img, scale_x, scale_y) where scale_x/y are the factors
+        to multiply resized-space coordinates by to get back to original-image
+        coordinates (used by the caller to un-project bounding boxes).
+        """
+        import cv2
+        h, w = img.shape[:2]
+        max_side = max(h, w)
+        if max_side <= self._MAX_OCR_SIDE:
+            return img, 1.0, 1.0
+        scale = self._MAX_OCR_SIDE / max_side
+        new_w = max(1, int(w * scale))
+        new_h = max(1, int(h * scale))
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        return resized, w / new_w, h / new_h
+
     def _run_paddle_ocr_with_boxes(self, img: "np.ndarray", page_num: int = 0):
         """
         Run OCR on *img* and return (full_text, lines).
@@ -294,8 +317,9 @@ class PDFParser(BaseParser):
         in the coordinate space of *img* (i.e. the original, un-preprocessed image).
         Always uses the original image so bounding boxes map directly to pixels.
         """
+        img_resized, scale_x, scale_y = self._resize_for_ocr(img)
         try:
-            results = list(self.ocr_engine.predict(img))
+            results = list(self.ocr_engine.predict(img_resized))
             if not results:
                 return "", []
 
@@ -306,6 +330,8 @@ class PDFParser(BaseParser):
                 for text, poly in zip(texts, polys):
                     if text and text.strip():
                         bbox = poly.tolist() if hasattr(poly, "tolist") else list(poly)
+                        if scale_x != 1.0 or scale_y != 1.0:
+                            bbox = [[int(p[0] * scale_x), int(p[1] * scale_y)] for p in bbox]
                         lines.append((text.strip(), bbox))
 
             full_text = "\n".join(t for t, _ in lines)
@@ -326,6 +352,7 @@ class PDFParser(BaseParser):
                 'rec_texts'  – list[str]  recognised text lines
                 'rec_scores' – list[float] confidence per line
         """
+        img, _, _ = self._resize_for_ocr(img)
         try:
             results = list(self.ocr_engine.predict(img))
             if not results:
@@ -375,13 +402,18 @@ class PDFParser(BaseParser):
             kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
             sharpened = cv2.filter2D(gray, -1, kernel)
 
-            # 2× upscale — significantly helps OCR on small-font documents
-            upscaled = cv2.resize(
-                gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
-            )
+            # 2× upscale — helps OCR on small/low-res images.
+            # Skip when the result would exceed _MAX_OCR_SIDE: the image is
+            # already high-resolution enough and doubling would needlessly
+            # create a large array that _resize_for_ocr would shrink back down.
+            if max(gray.shape[:2]) * 2 <= self._MAX_OCR_SIDE:
+                upscaled = cv2.resize(
+                    gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC
+                )
+                variants.append(upscaled)
 
             # PaddleOCR accepts numpy arrays directly — no PIL conversion needed
-            variants.extend([otsu, adaptive, denoised, sharpened, upscaled])
+            variants.extend([otsu, adaptive, denoised, sharpened])
 
         except Exception as e:
             logger.warning("cv2 preprocessing failed — using raw image only: %s", e)
