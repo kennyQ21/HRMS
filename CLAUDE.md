@@ -91,7 +91,7 @@ Three tables, schema owned by SQLAlchemy `Base.metadata.create_all`:
 **Images (new):** `.jpg/.jpeg`, `.png`, `.bmp`, `.tif/.tiff`, `.webp` — handled by `ImageParser`  
 **Archives:** `.zip` (password-protected supported); extracted and each file dispatched individually
 
-OCR backend: **EasyOCR** (PyTorch-based, ARM64-compatible). Runs in a child process via `services/ocr_worker.py` — a SIGSEGV in the worker kills only the child, not uvicorn. PDF still tries PyPDF2 text extraction first; falls back to OCR only if extracted text < 100 characters.
+OCR backend: **Tesseract** (`apt install tesseract-ocr` + `pytesseract` Python wrapper). Low memory footprint (~50 MB resident), ARM64-compatible via apt. Runs in a child process via `services/ocr_worker.py` — a crash in the worker kills only the child, not uvicorn. PDF still tries PyPDF2 text extraction first; falls back to OCR only if extracted text < 100 characters.
 
 Temp files now use `tempfile.NamedTemporaryFile` (cross-platform) instead of `/tmp/` hardcoding.
 

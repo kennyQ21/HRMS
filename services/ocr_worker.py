@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-One-shot OCR subprocess worker (EasyOCR backend).
+One-shot OCR subprocess worker (Tesseract backend via pytesseract).
 
 Usage:
     python -m services.ocr_worker [--boxes] img1 [img2 ...]
@@ -16,8 +16,8 @@ Each entry:
 from __future__ import annotations
 
 import json
-import os
 import sys
+from collections import defaultdict
 
 _MAX_SIDE = 4096  # resize before OCR to keep memory manageable
 
@@ -34,42 +34,54 @@ def _resize(img):
     return cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA), w / nw, h / nh
 
 
-def _load_engine():
-    import easyocr
-
-    # gpu=False: ARM64 containers typically have no CUDA GPU.
-    # verbose=False: suppress EasyOCR's download/progress output to stderr.
-    return easyocr.Reader(["en"], gpu=False, verbose=False)
-
-
-def _process(engine, img_path: str, with_boxes: bool) -> dict:
+def _process(img_path: str, with_boxes: bool) -> dict:
     import cv2
+    import pytesseract
+    from PIL import Image
 
     img = cv2.imread(img_path)
     if img is None:
         return {"text": "", "lines": []}
 
     img_ocr, sx, sy = _resize(img)
+    pil_img = Image.fromarray(cv2.cvtColor(img_ocr, cv2.COLOR_BGR2RGB))
 
-    # readtext returns [(bbox, text, confidence), ...]
-    # bbox = [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] in img_ocr pixel space
-    results = engine.readtext(img_ocr)
+    if not with_boxes:
+        text = pytesseract.image_to_string(pil_img).strip()
+        return {"text": text, "lines": []}
+
+    # Word-level data; group by (block, paragraph, line) → line-level entries
+    data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+
+    # Each group accumulates the words and the union bounding rect for the line.
+    groups: dict = defaultdict(lambda: {"words": [], "x1": [], "y1": [], "x2": [], "y2": []})
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        if not word or int(data["conf"][i]) < 0:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+        groups[key]["words"].append(word)
+        groups[key]["x1"].append(x)
+        groups[key]["y1"].append(y)
+        groups[key]["x2"].append(x + w)
+        groups[key]["y2"].append(y + h)
 
     lines = []
-    for bbox, text, _conf in results:
-        if not (text and text.strip()):
-            continue
-        if with_boxes:
-            # Scale bbox back to original image coordinates for redaction
-            if sx != 1.0 or sy != 1.0:
-                bbox = [[int(p[0] * sx), int(p[1] * sy)] for p in bbox]
-            lines.append([text.strip(), bbox])
-        else:
-            lines.append([text.strip(), []])
+    for key in sorted(groups):
+        g = groups[key]
+        line_text = " ".join(g["words"])
+        # Scale bbox back to original image coordinates
+        x1 = int(min(g["x1"]) * sx)
+        y1 = int(min(g["y1"]) * sy)
+        x2 = int(max(g["x2"]) * sx)
+        y2 = int(max(g["y2"]) * sy)
+        bbox = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+        lines.append([line_text, bbox])
 
     return {
         "text": "\n".join(t for t, _ in lines),
-        "lines": lines if with_boxes else [],
+        "lines": lines,
     }
 
 
@@ -82,11 +94,10 @@ def main():
         print(json.dumps([]))
         return
 
-    engine = _load_engine()
     results = []
     for p in paths:
         try:
-            results.append(_process(engine, p, with_boxes))
+            results.append(_process(p, with_boxes))
         except Exception as exc:
             results.append({"text": "", "lines": [], "error": str(exc)})
 
