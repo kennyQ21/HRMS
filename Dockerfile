@@ -10,10 +10,6 @@ RUN apt-get update \
         poppler-utils \
         build-essential \
         libpq-dev \
-        libgl1 \
-        libglib2.0-0 \
-        libgomp1 \
-        tesseract-ocr \
     && apt-get autoremove -y \
     && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*

@@ -168,8 +168,8 @@ class PDFParser(BaseParser):
     Parses PDF files using PyPDF2 for text-layer extraction, with an
     OCR fallback (via subprocess) for scanned/image-only PDFs.
 
-    Tesseract (via pytesseract) runs in a child process (services/ocr_worker.py)
-    so any crash kills only the child — uvicorn is unaffected.
+    OCR via Azure Document Intelligence runs in a child process
+    (services/ocr_worker.py) so any crash kills only the child — uvicorn is unaffected.
     """
 
     # DPI used when rasterising PDF pages for OCR.
@@ -242,8 +242,6 @@ class PDFParser(BaseParser):
         together (one model load for all pages), then the temp files are
         cleaned up.  If the worker crashes the function returns "".
         """
-        import cv2
-        import numpy as np
         from pdf2image import convert_from_path
 
         try:
@@ -259,10 +257,9 @@ class PDFParser(BaseParser):
         tmp_paths: list[str] = []
         try:
             for pil_img in images:
-                img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
                     tmp_paths.append(f.name)
-                cv2.imwrite(tmp_paths[-1], img_np)
+                pil_img.save(tmp_paths[-1])
 
             results = _run_ocr_subprocess(tmp_paths, with_boxes=False)
             page_texts = [r.get("text", "") for r in results]

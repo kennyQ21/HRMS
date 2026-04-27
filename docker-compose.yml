@@ -13,6 +13,8 @@ services:
       POSTGRES_PASSWORD: yMnE1i6Z27RG6JCah
       DATABASE_URL: postgres.chsgq28yetgt.ap-south-1.rds.amazonaws.com
       DB_PORT: 5432
+      AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: ${AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT}
+      AZURE_DOCUMENT_INTELLIGENCE_KEY: ${AZURE_DOCUMENT_INTELLIGENCE_KEY}
     labels:
       - "traefik.enable=true"
       
