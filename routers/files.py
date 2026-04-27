@@ -182,10 +182,28 @@ def _scan_file_blocking(
                             return {"status": "error", "message": "Incorrect ZIP password"}
                         raise
 
+                # Parser cache: PDFParser / ImageParser load PaddleOCR in __init__
+                # (2-5 s + significant memory per instance). Creating one per file in a
+                # ZIP causes repeated model loads and can OOM on multi-file archives.
+                # Reuse one instance per parser type for the lifetime of this ZIP.
+                _zip_parser_cache: dict = {}
+
                 for root, _, files in os.walk(extract_dir):
                     for extracted_file in files:
                         extracted_path = os.path.join(root, extracted_file)
-                        parser = _get_parser(extracted_file, password)
+                        fn_lower = extracted_file.lower()
+
+                        # Resolve parser — reuse cached instance for expensive types
+                        if fn_lower.endswith(".pdf"):
+                            if "pdf" not in _zip_parser_cache:
+                                _zip_parser_cache["pdf"] = PDFParser(password=password)
+                            parser = _zip_parser_cache["pdf"]
+                        elif fn_lower.endswith(IMAGE_EXTENSIONS):
+                            if "image" not in _zip_parser_cache:
+                                _zip_parser_cache["image"] = ImageParser()
+                            parser = _zip_parser_cache["image"]
+                        else:
+                            parser = _get_parser(extracted_file, password)
 
                         if parser is None:
                             all_results.append(
@@ -194,7 +212,7 @@ def _scan_file_blocking(
                             continue
 
                         try:
-                            is_image = extracted_file.lower().endswith(IMAGE_EXTENSIONS)
+                            is_image = fn_lower.endswith(IMAGE_EXTENSIONS)
                             if is_image:
                                 parsed_data = _parse_image_with_boxes(parser, extracted_path)
                             else:

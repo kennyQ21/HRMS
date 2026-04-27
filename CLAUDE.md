@@ -50,9 +50,9 @@ All route handlers live in `routers/`:
 
 | File | Endpoints |
 |------|-----------|
-| `connections.py` | `/check-connection`, `/get-schema` |
+| `connections.py` | `/check-connection`, `/get-schema`, `/get-pii-types` |
 | `data.py` | `/get-table-data`, `/ingest-table-data`, `/benchmark-table-data` |
-| `scans.py` | `/scan-database`, `/get-scan-results/{scan_id}`, `/get-scans`, `/get-pii-types` |
+| `scans.py` | `/scan-database`, `/get-scan-results/{scan_id}`, `/get-scans` |
 | `files.py` | `/scan-file` |
 
 `routers/scans.py` also exports `process_column_data` and `process_document_content` — shared helpers used by `routers/files.py`.

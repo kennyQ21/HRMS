@@ -103,6 +103,7 @@ async def redact_images(body: RedactRequest, db: Session = Depends(get_db)):
 
     zip_buf = io.BytesIO()
     redacted_count = 0
+    skipped: list[str] = []
 
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for filename, file_locs in by_file.items():
@@ -112,6 +113,7 @@ async def redact_images(body: RedactRequest, db: Session = Depends(get_db)):
                     "Stored image not found: %s — skipping (was it scanned with an older version?)",
                     img_path,
                 )
+                skipped.append(filename)
                 continue
 
             try:
@@ -123,6 +125,7 @@ async def redact_images(body: RedactRequest, db: Session = Depends(get_db)):
                 )
             except Exception as exc:
                 logger.error("Failed to redact %s: %s", filename, exc)
+                skipped.append(filename)
 
     if redacted_count == 0:
         raise HTTPException(
@@ -131,10 +134,11 @@ async def redact_images(body: RedactRequest, db: Session = Depends(get_db)):
         )
 
     zip_buf.seek(0)
-    return StreamingResponse(
-        zip_buf,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="redacted_scan_{body.scan_id}.zip"'
-        },
-    )
+    headers = {
+        "Content-Disposition": f'attachment; filename="redacted_scan_{body.scan_id}.zip"',
+    }
+    if skipped:
+        headers["X-Redaction-Skipped"] = json.dumps(skipped)
+        logger.warning("Partial redaction: skipped files %s", skipped)
+
+    return StreamingResponse(zip_buf, media_type="application/zip", headers=headers)

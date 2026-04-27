@@ -87,7 +87,7 @@ def process_column_data(
                     ScanAnomaly(
                         pii_type=pii_id,
                         match_count=match_count,
-                        confidence_score=match_count / total_rows if total_rows else 0,
+                        confidence_score=match_count / total_rows if total_rows else None,
                         column_scan=column_scan,
                     )
                 )
@@ -331,7 +331,7 @@ async def get_scan_results(scan_id: int, db: Session = Depends(get_db)):
                     {
                         "pii_type": anomaly.pii_type,
                         "match_count": anomaly.match_count,
-                        "confidence_score": round(anomaly.confidence_score, 3),
+                        "confidence_score": round(anomaly.confidence_score, 3) if anomaly.confidence_score is not None else None,
                     }
                 )
 
