@@ -26,8 +26,8 @@ def _run_ocr_subprocess(
     """
     Spawn the OCR worker in a child process and return its results.
 
-    The worker loads PaddleOCR, processes every image in *img_paths*, then
-    exits.  If PaddleOCR crashes (SIGSEGV, exit 139) the child dies but this
+    The worker loads EasyOCR, processes every image in *img_paths*, then
+    exits.  If EasyOCR crashes (SIGSEGV, exit 139) the child dies but this
     process is unaffected; we return an empty-text entry for every image so
     the scan still completes without killing the service.
 
@@ -168,7 +168,7 @@ class PDFParser(BaseParser):
     Parses PDF files using PyPDF2 for text-layer extraction, with an
     OCR fallback (via subprocess) for scanned/image-only PDFs.
 
-    PaddleOCR runs in a child process (services/ocr_worker.py) so any
+    EasyOCR runs in a child process (services/ocr_worker.py) so any
     native crash (SIGSEGV) kills only the child — uvicorn is unaffected.
     """
 
@@ -282,7 +282,7 @@ class ImageParser(PDFParser):
     """
     OCR parser for standalone image files (JPG/PNG/BMP/TIFF/WEBP).
 
-    All OCR runs in a subprocess (services/ocr_worker.py) so a PaddleOCR
+    All OCR runs in a subprocess (services/ocr_worker.py) so a EasyOCR
     native crash cannot take down the main service process.
     """
 
