@@ -23,18 +23,32 @@ import os
 import sys
 
 
-def _process(img_path: str, with_boxes: bool) -> dict:
+def _make_client():
     from azure.ai.documentintelligence import DocumentIntelligenceClient
     from azure.core.credentials import AzureKeyCredential
+    from azure.core.pipeline.policies import HeadersPolicy
 
-    endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT", "")
+    endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT", "").rstrip("/")
     key = os.environ.get("DOCUMENTINTELLIGENCE_API_KEY", "")
     if not endpoint or not key:
         raise RuntimeError(
             "DOCUMENTINTELLIGENCE_ENDPOINT and DOCUMENTINTELLIGENCE_API_KEY must be set"
         )
 
-    client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
+    # services.ai.azure.com (Azure AI Foundry) expects the key in the
+    # "api-key" header; cognitiveservices.azure.com uses
+    # "Ocp-Apim-Subscription-Key" (the SDK default). Override for Foundry.
+    if "services.ai.azure.com" in endpoint:
+        headers_policy = HeadersPolicy(base_headers={"api-key": key})
+        return DocumentIntelligenceClient(
+            endpoint, AzureKeyCredential(key),
+            headers_policy=headers_policy,
+        )
+    return DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
+
+
+def _process(img_path: str, with_boxes: bool) -> dict:
+    client = _make_client()
 
     with open(img_path, "rb") as f:
         poller = client.begin_analyze_document(
