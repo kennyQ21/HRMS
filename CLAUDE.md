@@ -111,6 +111,8 @@ Temp files now use `tempfile.NamedTemporaryFile` (cross-platform) instead of `/t
 | `POSTGRES_PASSWORD` | DB password (production) |
 | `DATABASE_URL` | DB host (production) |
 | `DB_PORT` | DB port, defaults to 5432 |
+| `DOCUMENTINTELLIGENCE_ENDPOINT` | Azure Document Intelligence endpoint URL |
+| `DOCUMENTINTELLIGENCE_API_KEY` | Azure Document Intelligence API key |
 
 ## Known issues
 

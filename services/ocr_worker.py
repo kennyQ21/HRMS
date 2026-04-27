@@ -13,8 +13,8 @@ Each entry:
 "lines" is populated only when --boxes is passed; otherwise it is [].
 
 Required env vars:
-    AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT
-    AZURE_DOCUMENT_INTELLIGENCE_KEY
+    DOCUMENTINTELLIGENCE_ENDPOINT
+    DOCUMENTINTELLIGENCE_API_KEY
 """
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ def _process(img_path: str, with_boxes: bool) -> dict:
     from azure.ai.documentintelligence import DocumentIntelligenceClient
     from azure.core.credentials import AzureKeyCredential
 
-    endpoint = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "")
-    key = os.environ.get("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
+    endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT", "")
+    key = os.environ.get("DOCUMENTINTELLIGENCE_API_KEY", "")
     if not endpoint or not key:
         raise RuntimeError(
-            "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY must be set"
+            "DOCUMENTINTELLIGENCE_ENDPOINT and DOCUMENTINTELLIGENCE_API_KEY must be set"
         )
 
     client = DocumentIntelligenceClient(endpoint, AzureKeyCredential(key))
@@ -39,7 +39,7 @@ def _process(img_path: str, with_boxes: bool) -> dict:
     with open(img_path, "rb") as f:
         poller = client.begin_analyze_document(
             "prebuilt-read",
-            analyze_request=f,
+            body=f,
             content_type="application/octet-stream",
         )
     result = poller.result()
