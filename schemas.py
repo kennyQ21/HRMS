@@ -76,6 +76,7 @@ class RedactRequest(BaseModel):
     scan_id: int
     filenames: List[str]
     pii_types: List[str]
+    redaction_type: Optional[str] = "contextual"   # full | partial | contextual | mask
 
 
 # ── Standardised API response wrapper ────────────────────────────────────────

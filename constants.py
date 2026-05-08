@@ -1,98 +1,417 @@
 from typing import TypedDict
 from enum import Enum
 
+
 class Category(str, Enum):
-    PERSONAL = 'Personal'
-    FINANCIAL = 'Financial'
-    HEALTHCARE = 'Healthcare'
-    PROFESSIONAL = 'Professional'
-    OTHER = 'Other'
+    GOVERNMENT_ID  = "Government ID"
+    FINANCIAL      = "Financial"
+    AUTHENTICATION = "Authentication"
+    PERSONAL       = "Personal"
+    MEDICAL        = "Medical"
+    INSURANCE      = "Insurance"
+    DEMOGRAPHIC    = "Demographic"
+    EMPLOYMENT     = "Employment"
+    EDUCATIONAL    = "Educational"
+    CONTACT        = "Contact"
+    GEO            = "Geo"
+    OTHER          = "Other"
+
 
 class Sensitivity(str, Enum):
-    VERY_HIGH = 'Very High'
-    HIGH = 'High'
-    MEDIUM = 'Medium'
-    LOW = 'Low'
+    CRITICAL  = "Critical"
+    VERY_HIGH = "Very High"
+    HIGH      = "High"
+    MEDIUM    = "Medium"
+    LOW       = "Low"
+
 
 class PIIType(TypedDict):
-    id: str
-    name: str
+    id:          str
+    name:        str
     description: str
-    category: Category
+    category:    Category
     sensitivity: Sensitivity
-    regex: str
+    regex:       str
+
+
+# ── MASTER PII Types ──────────────────────────────────────────────────────────
+# Covers all detection categories: deterministic (regex), semantic (GLiNER/LLM),
+# structural (Otter), and contextual.
+#
+# Each entry needs an id and sensitivity for routing; regex may be empty ("") for
+# types detected only by NER/LLM engines.
 
 PII_TYPES: list[PIIType] = [
+
+    # ── Government IDs ───────────────────────────────────────────────────────
     {
-        'id': 'email',
-        'name': 'Email Address',
-        'description': 'Personal or professional email addresses',
-        'category': Category.PERSONAL,
-        'sensitivity': Sensitivity.HIGH,
-        'regex': r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+        "id":          "aadhaar",
+        "name":        "Aadhaar Number",
+        "description": "12-digit Indian national biometric ID",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)",
     },
     {
-        'id': 'phone',
-        'name': 'Phone Number', 
-        'description': 'Mobile, landline, or fax numbers',
-        'category': Category.PERSONAL,
-        'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)"
+        "id":          "pan",
+        "name":        "PAN Number",
+        "description": "Indian Permanent Account Number",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
     },
     {
-        'id': 'dob',
-        'name': 'Date of Birth',
-        'description': 'Birth date information',
-        'category': Category.PERSONAL,
-        'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"(?i)\b(?:dob|date\s*of\s*birth)\s*[:\-]?\s*\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}\b"
+        "id":          "passport",
+        "name":        "Passport Number",
+        "description": "International travel document number",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"\b[A-Z][0-9]{7}\b",
     },
     {
-        'id': 'pan',
-        'name': 'PAN Number',
-        'description': 'Permanent Account Number',
-        'category': Category.FINANCIAL,
-        'sensitivity': Sensitivity.HIGH,
-        'regex': r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"
+        "id":          "voter_id",
+        "name":        "Voter ID",
+        "description": "Indian Electoral Photo Identity Card (EPIC)",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"\b[A-Z]{3}[0-9]{7}\b",
     },
     {
-        'id': 'aadhaar',
-        'name': 'Aadhaar Number',
-        'description': 'Unique identification number',
-        'category': Category.PERSONAL,
-        'sensitivity': Sensitivity.HIGH,
-        'regex': r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)"
+        "id":          "driving_license",
+        "name":        "Driving Licence",
+        "description": "Indian state-issued driving licence number",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{1,15}\b",
     },
     {
-        'id': 'credit_card',
-        'name': 'Credit Card Number',
-        'description': 'Credit card numbers',
-        'category': Category.FINANCIAL,
-        'sensitivity': Sensitivity.HIGH,
-        'regex': r"\b(?:\d[ -]*?){13,16}\b"
+        "id":          "ssn",
+        "name":        "Social Security Number",
+        "description": "US Social Security Number",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+    },
+
+    # ── Financial ────────────────────────────────────────────────────────────
+    {
+        "id":          "credit_card",
+        "name":        "Credit/Debit Card Number",
+        "description": "16-digit payment card number (Luhn-validated)",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"\b(?:\d[ -]*?){13,16}\b",
     },
     {
-        'id': 'expiry',
-        'name': 'Expiry Date',
-        'description': 'Card expiry dates',
-        'category': Category.FINANCIAL,
-        'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"(?i)\b(?:exp|expiry|valid\s*thru)\s*[:\-]?\s*(?:0[1-9]|1[0-2])\/\d{2,4}\b"
+        "id":          "bank_account",
+        "name":        "Bank Account Number",
+        "description": "Bank account number",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"(?i)\b(?:account\s*(?:no|num(?:ber)?|#)\s*[:\-]?\s*)([0-9]{9,18})\b",
     },
     {
-        'id': 'cvv',
-        'name': 'CVV',
-        'description': 'Card verification value',
-        'category': Category.FINANCIAL,
-        'sensitivity': Sensitivity.HIGH,
-        'regex': r"(?i)\b(?:cvv|cvc|security\s*code)\s*[:\-]?\s*\d{3}\b"
+        "id":          "upi",
+        "name":        "UPI ID",
+        "description": "Unified Payments Interface virtual address",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.HIGH,
+        # UPI IDs end with known bank VPA handles — explicitly match those,
+        # not generic email-like @domain patterns.
+        "regex":       r"\b[a-zA-Z0-9.\-_]{2,}@(?:okaxis|okhdfcbank|oksbi|okicici|ybl|axisbank|upi|paytm|ibl|timecosmos|apl|jupiter|fbl|rbl|kotak|barodampay|centralbank|idbi|pnb|aubank|indus|mahb|scb|abfspay|nsdl|juspay)\b",
     },
     {
-        'id': 'address',
-        'name': 'Address',
-        'description': 'Physical addresses',
-        'category': Category.PERSONAL,
-        'sensitivity': Sensitivity.MEDIUM,
-        'regex': r"(?i)\b(?:address|addr)\s*[:\-]?\s*[A-Za-z0-9][A-Za-z0-9\s,./#-]{8,}\b"
-    }
+        "id":          "ifsc",
+        "name":        "IFSC Code",
+        "description": "Indian Financial System Code for bank branches",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"\b[A-Z]{4}0[A-Z0-9]{6}\b",
+    },
+    {
+        "id":          "expiry",
+        "name":        "Card Expiry Date",
+        "description": "Payment card expiry date",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?i)\b(?:exp(?:iry)?|valid\s*(?:thru|through|till))\s*[:\-]?\s*(?:0[1-9]|1[0-2])[\/\-]\d{2,4}\b",
+    },
+    {
+        "id":          "cvv",
+        "name":        "CVV / CVC",
+        "description": "Card verification value",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.CRITICAL,
+        "regex":       r"(?i)\b(?:cvv|cvc|security\s*code)\s*[:\-]?\s*\d{3,4}\b",
+    },
+
+    # ── Authentication ────────────────────────────────────────────────────────
+    {
+        "id":          "user_id",
+        "name":        "Username / User ID",
+        "description": "System login identifier",
+        "category":    Category.AUTHENTICATION,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?i)\b(?:username|user(?:\s*id)?|login(?:\s*id)?)\s*[:\-]?\s*([A-Za-z0-9._@\-]{3,50})",
+    },
+    {
+        "id":          "password",
+        "name":        "Password",
+        "description": "Authentication credential",
+        "category":    Category.AUTHENTICATION,
+        "sensitivity": Sensitivity.CRITICAL,
+        "regex":       r"(?i)\b(?:password|passwd|pwd)\s*[:\-=]?\s*(\S{6,})",
+    },
+
+    # ── Personal ──────────────────────────────────────────────────────────────
+    {
+        "id":          "name",
+        "name":        "Person Name",
+        "description": "Full or partial person name",
+        "category":    Category.PERSONAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       "",   # detected by GLiNER / Presidio
+    },
+    {
+        "id":          "dob",
+        "name":        "Date of Birth",
+        "description": "Birth date",
+        "category":    Category.PERSONAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:dob|date\s*of\s*birth|birth\s*date)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b",
+    },
+    {
+        "id":          "address",
+        "name":        "Physical Address",
+        "description": "Full or partial postal address",
+        "category":    Category.PERSONAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?i)\b(?:address|addr)\s*[:\-]?\s*[A-Za-z0-9][A-Za-z0-9\s,./#\-]{8,}",
+    },
+    {
+        "id":          "gender",
+        "name":        "Gender",
+        "description": "Gender or sex identification",
+        "category":    Category.DEMOGRAPHIC,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:gender|sex)\s*[:\-]?\s*(?:male|female|non[\s\-]binary|transgender|other)\b",
+    },
+    {
+        "id":          "age",
+        "name":        "Age",
+        "description": "Person age",
+        "category":    Category.DEMOGRAPHIC,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:age)\s*[:\-]?\s*(\d{1,3})\s*(?:years?|yrs?)?\b",
+    },
+    {
+        "id":          "nationality",
+        "name":        "Nationality",
+        "description": "Nationality or citizenship",
+        "category":    Category.PERSONAL,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       "",   # detected by GLiNER / LLM
+    },
+    {
+        "id":          "marital_status",
+        "name":        "Marital Status",
+        "description": "Marital or relationship status",
+        "category":    Category.DEMOGRAPHIC,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:marital\s*status)\s*[:\-]?\s*(?:single|married|divorced|widowed|separated|unmarried)\b",
+    },
+
+    # ── Medical ───────────────────────────────────────────────────────────────
+    {
+        "id":          "diagnosis",
+        "name":        "Medical Diagnosis",
+        "description": "Medical condition or diagnosis",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.CRITICAL,
+        "regex":       "",   # semantic — detected by Qwen LLM + GLiNER
+    },
+    {
+        "id":          "allergies",
+        "name":        "Allergies",
+        "description": "Drug or environmental allergy records",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.CRITICAL,
+        # Line-bounded so it doesn't greedily consume following lines
+        "regex":       r"(?i)\b(?:allerg(?:y|ies|ic\s*to))\s*[:\-]?\s*([A-Za-z][A-Za-z,\s]{2,50})(?=\n|$|;|\|)",
+    },
+    {
+        "id":          "treatment_history",
+        "name":        "Treatment History",
+        "description": "Medical procedures or treatment records",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.CRITICAL,
+        "regex":       "",   # semantic — detected by Qwen LLM
+    },
+    {
+        "id":          "prescription",
+        "name":        "Prescription / Medication",
+        "description": "Drug prescriptions or dosage information",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.CRITICAL,
+        "regex":       r"(?i)\b(?:prescribed?|medication|tablet|capsule|mg\s*/\s*(?:day|dose))\b",
+    },
+    {
+        "id":          "immunization",
+        "name":        "Immunization Record",
+        "description": "Vaccination or immunization history",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:vaccin(?:e|ated|ation)|immuniz(?:ed|ation)|booster)\b",
+    },
+    {
+        "id":          "blood_group",
+        "name":        "Blood Group",
+        "description": "ABO and Rh blood type",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"\b(?:A|B|AB|O)[+-]\b",
+    },
+    {
+        "id":          "mrn",
+        "name":        "Medical Record Number",
+        "description": "Hospital or clinic patient MRN",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"(?i)\b(?:mrn|patient\s*id|record\s*(?:no|num(?:ber)?))\s*[:\-#]?\s*([A-Z0-9]{4,15})\b",
+    },
+
+    # ── Insurance ─────────────────────────────────────────────────────────────
+    {
+        "id":          "insurance_policy",
+        "name":        "Insurance Policy Number",
+        "description": "Health, life, or general insurance policy ID",
+        "category":    Category.INSURANCE,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:policy\s*(?:no|num(?:ber)?|#))\s*[:\-]?\s*([A-Z0-9/\-]{5,20})\b",
+    },
+    {
+        "id":          "insurance_provider",
+        "name":        "Insurance Provider",
+        "description": "Name of insurance company",
+        "category":    Category.INSURANCE,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       "",   # detected by GLiNER / LLM
+    },
+
+    # ── Employment ────────────────────────────────────────────────────────────
+    {
+        "id":          "occupation",
+        "name":        "Occupation / Job Title",
+        "description": "Profession, designation, or job role",
+        "category":    Category.EMPLOYMENT,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       "",   # semantic — detected by GLiNER / Qwen
+    },
+    {
+        "id":          "employee_id",
+        "name":        "Employee ID",
+        "description": "Internal employee or staff identifier",
+        "category":    Category.EMPLOYMENT,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?i)\b(?:emp(?:loyee)?\s*(?:id|no|code))\s*[:\-#]?\s*([A-Z0-9]{3,15})\b",
+    },
+    {
+        "id":          "corporate_email",
+        "name":        "Corporate Email",
+        "description": "Work or organisation email address (non-consumer domain)",
+        "category":    Category.EMPLOYMENT,
+        "sensitivity": Sensitivity.MEDIUM,
+        # Only match non-consumer domains; consumer domains handled by 'email' type
+        "regex":       r"[A-Za-z0-9._%+\-]+@(?!(?:gmail|yahoo|hotmail|outlook|rediff|icloud|proton)\.)[A-Za-z0-9\-]+\.(?:com|org|net|in|co\.in|gov\.in)",
+    },
+    {
+        "id":          "organization",
+        "name":        "Organisation Name",
+        "description": "Company, institution, or agency name",
+        "category":    Category.EMPLOYMENT,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       "",   # detected by GLiNER / Presidio
+    },
+
+    # ── Educational ───────────────────────────────────────────────────────────
+    {
+        "id":          "educational_qualification",
+        "name":        "Educational Qualification",
+        "description": "Academic degrees, diplomas, or certifications",
+        "category":    Category.EDUCATIONAL,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:b\.?(?:sc|tech|e|com|a)|m\.?(?:sc|tech|e|com|a|b\.?a)|m\.?d|ph\.?d|m\.?b\.?b\.?s|diploma|bachelor|master|doctorate)\b",
+    },
+
+    # ── Contact ───────────────────────────────────────────────────────────────
+    {
+        "id":          "email",
+        "name":        "Email Address",
+        "description": "Personal or professional email address",
+        "category":    Category.CONTACT,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+    },
+    {
+        "id":          "phone",
+        "name":        "Phone Number",
+        "description": "Mobile, landline, or international phone number",
+        "category":    Category.CONTACT,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?<!\d)(?:\+91[\s\-]?)?[6-9]\d{9}(?!\d)",
+    },
+
+    # ── Geo ───────────────────────────────────────────────────────────────────
+    {
+        "id":          "pincode",
+        "name":        "Postal / PIN Code",
+        "description": "6-digit Indian PIN code",
+        "category":    Category.GEO,
+        "sensitivity": Sensitivity.LOW,
+        # 6-digit Indian PIN codes only; require context label to reduce false positives
+        "regex":       r"(?i)\b(?:pin\s*(?:code)?|postal\s*(?:code)?|zip)\s*[:\-]?\s*(\d{6})\b",
+    },
+    {
+        "id":          "city",
+        "name":        "City / Town",
+        "description": "City, town, or locality name",
+        "category":    Category.GEO,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       "",   # detected by GLiNER / Presidio LOCATION
+    },
+
+    # ── Other ─────────────────────────────────────────────────────────────────
+    {
+        "id":          "ip_address",
+        "name":        "IP Address",
+        "description": "IPv4 or IPv6 network address",
+        "category":    Category.OTHER,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b",
+    },
 ]
+
+
+# Convenience lookup: id → PII entry
+PII_TYPE_MAP: dict[str, PIIType] = {p["id"]: p for p in PII_TYPES}
+
+# Sensitivity ordering (highest first) — used for priority scoring
+SENSITIVITY_ORDER: dict[str, int] = {
+    Sensitivity.CRITICAL:  6,
+    Sensitivity.VERY_HIGH: 5,
+    Sensitivity.HIGH:      4,
+    Sensitivity.MEDIUM:    3,
+    Sensitivity.LOW:       2,
+}
+
+# IDs whose detection is purely semantic (no regex) — routed to NER/LLM only
+SEMANTIC_ONLY_PII: set[str] = {
+    p["id"] for p in PII_TYPES if not p.get("regex")
+}
+
+# IDs that benefit most from LLM interpretation
+LLM_PRIORITY_PII: set[str] = {
+    "diagnosis", "treatment_history", "allergies", "prescription",
+    "immunization", "occupation", "educational_qualification",
+    "insurance_provider", "nationality",
+}
