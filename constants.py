@@ -207,7 +207,10 @@ PII_TYPES: list[PIIType] = [
         "description": "Full or partial postal address",
         "category":    Category.PERSONAL,
         "sensitivity": Sensitivity.MEDIUM,
-        "regex":       r"(?i)\b(?:address|addr)\s*[:\-]?\s*[A-Za-z0-9][A-Za-z0-9\s,./#\-]{8,}",
+        # Label-gated address: requires "Address:" prefix, captures up to 200
+        # chars but stops at double-newline or known non-address patterns.
+        # Avoids greedily consuming names and OCR garbage that follow the address.
+        "regex":       r"(?i)\b(?:address|addr|residence)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\s,./#\-]{8,150})(?=\n\n|\Z|(?:\n[A-Z][a-z]+\s*[:\-]))",
     },
     {
         "id":          "gender",
@@ -215,7 +218,9 @@ PII_TYPES: list[PIIType] = [
         "description": "Gender or sex identification",
         "category":    Category.DEMOGRAPHIC,
         "sensitivity": Sensitivity.LOW,
-        "regex":       r"(?i)\b(?:gender|sex)\s*[:\-]?\s*(?:male|female|non[\s\-]binary|transgender|other)\b",
+        # Matches labelled ("Gender: Male") and standalone uppercase ("MALE")
+        # as seen on Aadhaar, PAN, passports and driving licences.
+        "regex":       r"(?i)(?:\b(?:gender|sex|लिंग|جنس)\s*[:\-\/]?\s*)?(?<![A-Za-z])(MALE|FEMALE|Male|Female|TRANSGENDER|Non[\s\-]Binary|Other)(?![A-Za-z])",
     },
     {
         "id":          "age",

@@ -155,21 +155,48 @@ class Validator:
             if e.start < 0 or e.end < 0:
                 continue   # span unknown — skip
             actual = text[e.start:e.end]
-            # Strip whitespace for comparison
-            if actual.strip().lower() != e.value.strip().lower():
-                # Try a substring search as fallback
-                found_pos = text.lower().find(e.value.lower())
-                if found_pos == -1:
-                    issues.append(ValidationIssue(
-                        severity="warning",
-                        code="SPAN_VALUE_MISMATCH",
-                        message=f"Entity value {e.value!r} not found at span [{e.start}:{e.end}]",
-                        pii_type=e.pii_type,
-                        value=e.value,
-                        span_start=e.start,
-                        span_end=e.end,
-                    ))
-                    errors += 1
+
+            # ── Normalised comparison ─────────────────────────────────────────
+            # Numeric IDs (Aadhaar, PAN, SSN, etc.) may have spaces/hyphens
+            # stripped during entity resolution but not from the raw OCR span.
+            # Compare digit-only forms for such types before reporting mismatch.
+            _NUMERIC_TYPES = {
+                "aadhaar", "ssn", "credit_card", "bank_account",
+                "phone", "mrn", "nhs_number", "iban",
+            }
+            import re as _re
+
+            def _norm(s: str) -> str:
+                return _re.sub(r"[\s\-_]", "", s).lower()
+
+            actual_norm = _norm(actual)
+            value_norm  = _norm(e.value)
+
+            if actual_norm == value_norm:
+                continue   # matched after normalisation — no issue
+
+            if actual.strip().lower() == e.value.strip().lower():
+                continue   # exact match
+
+            # For numeric types compare digit-only
+            if e.pii_type in _NUMERIC_TYPES:
+                if _re.sub(r"\D", "", actual) == _re.sub(r"\D", "", e.value):
+                    continue
+
+            # Substring search as final fallback
+            if text.lower().find(e.value.lower()) != -1:
+                continue
+
+            issues.append(ValidationIssue(
+                severity="warning",
+                code="SPAN_VALUE_MISMATCH",
+                message=f"Entity value {e.value!r} not found at span [{e.start}:{e.end}]",
+                pii_type=e.pii_type,
+                value=e.value,
+                span_start=e.start,
+                span_end=e.end,
+            ))
+            errors += 1
         return errors
 
     # ── Check: Overlaps ───────────────────────────────────────────────────────

@@ -67,8 +67,11 @@ _SCRIPT_BLOCKS: list[tuple[int, int, str]] = [
     (0x10A0, 0x10FF, "ka"),   # Georgian
 ]
 
-# Minimum fraction of non-ASCII chars to declare a text "foreign"
-_FOREIGN_THRESHOLD = 0.05
+# Minimum fraction of non-ASCII chars to declare a text "foreign".
+# Raised from 0.05 to 0.12 — OCR on English docs (Aadhaar, PAN, driving
+# licences) often produces 5–10% noise chars that look like foreign script.
+# At 0.12 we only trigger Qwen when genuinely multilingual content is present.
+_FOREIGN_THRESHOLD = 0.12
 
 
 @dataclass

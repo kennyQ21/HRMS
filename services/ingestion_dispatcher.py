@@ -60,6 +60,28 @@ _ID_KEYWORDS = re.compile(
     r"identity|national\s*id|id\s*card|uid)\b"
 )
 
+# Specific identity document classifiers (checked after generic _ID_KEYWORDS)
+_AADHAAR_SIGNALS = re.compile(
+    r"(?i)\b(?:aadhaar|uidai|unique\s*identification\s*authority|"
+    r"आधार|আধার|ಆಧಾರ್|ஆதார்|ఆధార్)\b"
+)
+_PAN_SIGNALS = re.compile(
+    r"(?i)\b(?:permanent\s*account\s*number|income\s*tax\s*department|"
+    r"pan\s*card)\b"
+)
+_PASSPORT_SIGNALS = re.compile(
+    r"(?i)\b(?:republic\s*of|ministry\s*of\s*external|passport\s*no|"
+    r"nationality|place\s*of\s*birth|date\s*of\s*issue)\b"
+)
+_VOTER_SIGNALS = re.compile(
+    r"(?i)\b(?:election\s*commission|elector\s*photo|epic|voter\s*id|"
+    r"electoral\s*roll)\b"
+)
+_DL_SIGNALS = re.compile(
+    r"(?i)\b(?:driving\s*licen[cs]e|motor\s*vehicles|transport\s*department|"
+    r"dl\s*no|licence\s*no)\b"
+)
+
 
 @dataclass
 class IngestionPlan:
@@ -225,20 +247,42 @@ class IngestionDispatcher:
         """
         fname_lower = filename.lower()
 
-        # Filename-based detection
+        # Filename-based detection — specific ID types first
+        if _AADHAAR_SIGNALS.search(fname_lower):
+            return "aadhaar_card", "filename contains Aadhaar signals"
+        if _PAN_SIGNALS.search(fname_lower):
+            return "pan_card", "filename contains PAN card signals"
+        if _PASSPORT_SIGNALS.search(fname_lower):
+            return "passport", "filename contains passport signals"
+        if _VOTER_SIGNALS.search(fname_lower):
+            return "voter_id", "filename contains voter ID signals"
+        if _DL_SIGNALS.search(fname_lower):
+            return "driving_license", "filename contains driving licence signals"
         if _MEDICAL_KEYWORDS.search(fname_lower):
-            return "medical", f"filename contains medical keywords"
+            return "medical", "filename contains medical keywords"
         if _FINANCIAL_KEYWORDS.search(fname_lower):
-            return "financial", f"filename contains financial keywords"
+            return "financial", "filename contains financial keywords"
         if _HR_KEYWORDS.search(fname_lower):
-            return "hr", f"filename contains HR keywords"
+            return "hr", "filename contains HR keywords"
         if _ID_KEYWORDS.search(fname_lower):
-            return "id", f"filename contains ID-document keywords"
+            return "id", "filename contains ID-document keywords"
 
         # Content-based detection (only for text-extractable types)
-        if parser_t in _DOCUMENT_PARSERS | {"docx", "doc", "odt", "rtf"}:
+        if parser_t in _DOCUMENT_PARSERS | {"docx", "doc", "odt", "rtf", "image"}:
             snippet = self._read_text_snippet(file_path, parser_t)
             if snippet:
+                # Check specific ID document types first (highest confidence)
+                if _AADHAAR_SIGNALS.search(snippet):
+                    return "aadhaar_card", "content: Aadhaar/UIDAI signals found"
+                if _PAN_SIGNALS.search(snippet):
+                    return "pan_card", "content: PAN card signals found"
+                if _PASSPORT_SIGNALS.search(snippet):
+                    return "passport", "content: passport signals found"
+                if _VOTER_SIGNALS.search(snippet):
+                    return "voter_id", "content: voter ID signals found"
+                if _DL_SIGNALS.search(snippet):
+                    return "driving_license", "content: driving licence signals found"
+
                 med_hits = len(_MEDICAL_KEYWORDS.findall(snippet))
                 fin_hits = len(_FINANCIAL_KEYWORDS.findall(snippet))
                 hr_hits  = len(_HR_KEYWORDS.findall(snippet))

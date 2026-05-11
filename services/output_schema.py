@@ -143,7 +143,13 @@ def build_scan_response(
     if validation_report:
         validation_results = validation_report.summary()
 
-    return {
+    # ── structured_fields — for identity documents ────────────────────────────
+    # When the document is a known identity card type, extract a clean key-value
+    # map of the most important fields for downstream compliance workflows.
+    doc_type = doc_meta.get("doc_type", "generic")
+    structured_fields = _build_structured_fields(doc_type, resolved_entities)
+
+    result: dict[str, Any] = {
         "status":              "success",
         "document_metadata":   doc_meta,
         "entities":            entities,
@@ -153,6 +159,53 @@ def build_scan_response(
         "processing_metrics":  processing_metrics,
         "validation_results":  validation_results,
     }
+    if structured_fields:
+        result["structured_fields"] = structured_fields
+
+    return result
+
+
+# ── Identity document structured field extractor ──────────────────────────────
+
+_ID_DOC_TYPES = {
+    "aadhaar_card":    ["name", "dob", "gender", "aadhaar", "address", "pincode"],
+    "pan_card":        ["name", "dob", "pan"],
+    "passport":        ["name", "dob", "gender", "passport", "nationality", "address"],
+    "voter_id":        ["name", "dob", "gender", "voter_id", "address"],
+    "driving_license": ["name", "dob", "gender", "driving_license", "address"],
+    "id":              ["name", "dob", "aadhaar", "pan", "passport", "voter_id", "driving_license"],
+}
+
+
+def _build_structured_fields(
+    doc_type: str,
+    resolved_entities: list,
+) -> dict[str, Any]:
+    """
+    For identity documents, produce a clean structured key-value map.
+    Only populated when doc_type is a known identity card type.
+    """
+    wanted_types = _ID_DOC_TYPES.get(doc_type)
+    if not wanted_types:
+        return {}
+
+    fields: dict[str, Any] = {"document_type": doc_type}
+    by_type: dict[str, list] = {}
+    for e in resolved_entities:
+        by_type.setdefault(e.pii_type, []).append(e)
+
+    for ptype in wanted_types:
+        items = by_type.get(ptype, [])
+        if not items:
+            continue
+        # Pick highest-confidence value
+        best = max(items, key=lambda e: e.confidence)
+        fields[ptype] = {
+            "value":      best.value,
+            "confidence": round(best.confidence, 3),
+        }
+
+    return fields
 
 
 def build_error_response(filename: str, error: str) -> dict[str, Any]:
