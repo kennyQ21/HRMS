@@ -1,10 +1,12 @@
 """
-POST /scan-file
----------------
-Upload any supported file → receive PII detection JSON.
+Vault Migration Service — API routes.
 
-Supported formats: PDF, DOCX, DOC, ODT, RTF, CSV, XLSX, XLS,
-                   JPG, PNG, BMP, TIFF, WEBP, MDB, SQL, ZIP
+Endpoints:
+  GET  /status      → service health, engine status, model availability
+  POST /scan-file   → upload any file, receive structured PII JSON
+
+Supported file formats: PDF, DOCX, DOC, ODT, RTF, CSV, XLSX, XLS,
+                        JPG, PNG, BMP, TIFF, WEBP, MDB, SQL, ZIP
 """
 from __future__ import annotations
 
@@ -313,7 +315,91 @@ def _scan_blocking(
         db.close()
 
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
+# ── GET /status ───────────────────────────────────────────────────────────────
+
+@router.get("/status", summary="Service health and engine status")
+async def status():
+    """
+    Returns the health of the service and the availability of every engine.
+
+    Response fields:
+    - **service**: always `"ok"` if the API is reachable
+    - **engines.regex**: always ready (no model load needed)
+    - **engines.gliner**: whether the GLiNER model is loaded in memory
+    - **engines.ocr**: whether PaddleOCR mobile models are loaded
+    - **engines.llm**: whether Ollama + qwen2.5:0.5b are reachable
+    - **supported_formats**: list of file extensions accepted by /scan-file
+    - **routing**: language-to-engine mapping summary
+    """
+    import requests as _requests
+    from services.detection_dispatcher import _regex_engine, _gliner_engine
+    from services.ocr_engine import _get_ocr
+
+    # ── GLiNER ────────────────────────────────────────────────────────────────
+    try:
+        gliner_loaded = _gliner_engine.cache_info().currsize > 0
+    except Exception:
+        gliner_loaded = False
+
+    # ── OCR ───────────────────────────────────────────────────────────────────
+    try:
+        ocr_loaded = _get_ocr.cache_info().currsize > 0
+    except Exception:
+        ocr_loaded = False
+
+    # ── LLM / Ollama ──────────────────────────────────────────────────────────
+    ollama_ok   = False
+    ollama_model = None
+    try:
+        r = _requests.get("http://localhost:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            models = [m["name"] for m in r.json().get("models", [])]
+            ollama_ok    = True
+            ollama_model = "qwen2.5:0.5b" if "qwen2.5:0.5b" in models else (models[0] if models else None)
+    except Exception:
+        pass
+
+    return {
+        "service": "ok",
+        "version": "3.0.0",
+        "engines": {
+            "regex": {
+                "status": "ready",
+                "description": "Deterministic structured PII (always active)",
+            },
+            "gliner": {
+                "status": "loaded" if gliner_loaded else "idle",
+                "description": "English semantic NER — loads on first request",
+                "model": "urchade/gliner_mediumv2.1",
+            },
+            "ocr": {
+                "status": "loaded" if ocr_loaded else "idle",
+                "description": "PaddleOCR mobile — loads on startup warm-up",
+                "model": "PP-OCRv5_mobile_det + en_PP-OCRv5_mobile_rec",
+            },
+            "llm": {
+                "status": "ready" if ollama_ok else "offline",
+                "description": "Qwen 0.5B — multilingual + foreign language PII",
+                "model": ollama_model or "qwen2.5:0.5b",
+                "note": "Start Ollama to enable multilingual detection" if not ollama_ok else None,
+            },
+        },
+        "routing": {
+            "english":        "Regex + GLiNER",
+            "foreign_indic":  "Regex + Qwen 0.5B  (requires Ollama)",
+            "mixed":          "Regex + GLiNER + Qwen 0.5B",
+            "medical":        "Regex + GLiNER + Qwen 0.5B",
+        },
+        "supported_formats": [
+            "pdf", "docx", "doc", "odt", "rtf",
+            "csv", "xlsx", "xls",
+            "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp",
+            "mdb", "sql", "zip",
+        ],
+    }
+
+
+# ── POST /scan-file ────────────────────────────────────────────────────────────
 
 @router.post("/scan-file", summary="Scan a file for PII")
 async def scan_file(
