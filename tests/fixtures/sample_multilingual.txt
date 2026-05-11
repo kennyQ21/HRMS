@@ -1,0 +1,26 @@
+Multilingual Contact Information
+==================================
+
+English Contact:
+Name: David Chen
+Email: david.chen@global.com
+Phone: +86-138-1234-5678
+
+Hindi Contact:
+नाम: अमित शर्मा
+ईमेल: amit.sharma@hindi.com
+फोन: +91-9876543210
+
+Arabic Contact:
+الاسم: أحمد محمد
+البريد الإلكتروني: ahmed@example.ae
+الهاتف: +971-50-123-4567
+
+Spanish Contact:
+Nombre: Carlos García
+Correo: carlos@espana.es
+Teléfono: +34-612-345-678
+
+Notes:
+This file tests multilingual PII detection.
+All contacts are fictional for testing purposes.

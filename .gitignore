@@ -1,3 +1,20 @@
+# ── Project-specific ──────────────────────────────────────────────────────────
+# Runtime data
+uploads/
+debug/
+results/
+*.db
+*.db-journal
+ocr_test_output.txt
+
+# Scan output JSON (runtime results, not source)
+sample/output/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# ── Python standard ────────────────────────────────────────────────────────────
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -66,7 +66,9 @@ PII_TYPES: list[PIIType] = [
         "description": "International travel document number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.VERY_HIGH,
-        "regex":       r"\b[A-Z][0-9]{7}\b",
+        # Requires explicit label to avoid colliding with PAN/voter IDs.
+        # Covers: India (A1234567), US (123456789), UK (123456789), EU formats.
+        "regex":       r"(?i)\b(?:passport\s*(?:no|num(?:ber)?|#)?)\s*[:\-]?\s*([A-Z0-9]{6,9})\b",
     },
     {
         "id":          "voter_id",
@@ -129,6 +131,23 @@ PII_TYPES: list[PIIType] = [
         "regex":       r"\b[A-Z]{4}0[A-Z0-9]{6}\b",
     },
     {
+        "id":          "iban",
+        "name":        "IBAN",
+        "description": "International Bank Account Number (EU/global)",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        # Matches IBAN: GB29 NWBK 6016 1331 9268 19, DE89370400440532013000, etc.
+        "regex":       r"\b[A-Z]{2}\d{2}[\s]?(?:[A-Z0-9]{4}[\s]?){1,7}[A-Z0-9]{1,4}\b",
+    },
+    {
+        "id":          "nhs_number",
+        "name":        "NHS Number",
+        "description": "UK National Health Service patient number",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        "regex":       r"(?i)\b(?:nhs\s*(?:no|num(?:ber)?|#)?)\s*[:\-]?\s*(\d{3}[\s\-]?\d{3}[\s\-]?\d{4})\b",
+    },
+    {
         "id":          "expiry",
         "name":        "Card Expiry Date",
         "description": "Payment card expiry date",
@@ -178,7 +197,9 @@ PII_TYPES: list[PIIType] = [
         "description": "Birth date",
         "category":    Category.PERSONAL,
         "sensitivity": Sensitivity.HIGH,
-        "regex":       r"(?i)\b(?:dob|date\s*of\s*birth|birth\s*date)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\b",
+        # Universal DOB: label-gated to avoid false positives on bare dates.
+        # Matches: DD/MM/YYYY, MM-DD-YYYY, YYYY.MM.DD, and label variants in any language context.
+        "regex":       r"(?i)\b(?:dob|date\s*of\s*birth|birth\s*(?:date|day)|born\s*(?:on)?|जन्म\s*तिथि|تاريخ الميلاد)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b",
     },
     {
         "id":          "address",
@@ -340,7 +361,14 @@ PII_TYPES: list[PIIType] = [
         "description": "Academic degrees, diplomas, or certifications",
         "category":    Category.EDUCATIONAL,
         "sensitivity": Sensitivity.LOW,
-        "regex":       r"(?i)\b(?:b\.?(?:sc|tech|e|com|a)|m\.?(?:sc|tech|e|com|a|b\.?a)|m\.?d|ph\.?d|m\.?b\.?b\.?s|diploma|bachelor|master|doctorate)\b",
+        # Requires explicit degree abbreviations (B.Tech, BSc, MBA, PhD, etc.)
+        # or full words (Bachelor, Master, Doctorate, Diploma).
+        # Old pattern matched "be"/"me"/"ba"/"ma" as single letters — fixed.
+        "regex":       r"\b(?:B\.(?:Sc|Tech|E|Com|A|Ed)|BSc|BTech|BE|BEd|BCom|BA|"
+                       r"M\.(?:Sc|Tech|E|Com|B\.A|Ed|Phil)|MSc|MTech|ME|MBA|MEd|MPhil|"
+                       r"M\.D\.|Ph\.D\.?|PhD|MBBS|M\.B\.B\.S|"
+                       r"[Dd]iploma|[Bb]achelor(?:'?s)?|[Mm]aster(?:'?s)?|[Dd]octorate|"
+                       r"[Pp]ost[Gg]raduate|[Uu]ndergraduate)\b",
     },
 
     # ── Contact ───────────────────────────────────────────────────────────────
@@ -355,10 +383,17 @@ PII_TYPES: list[PIIType] = [
     {
         "id":          "phone",
         "name":        "Phone Number",
-        "description": "Mobile, landline, or international phone number",
+        "description": "Mobile, landline, or international phone number in any country",
         "category":    Category.CONTACT,
         "sensitivity": Sensitivity.MEDIUM,
-        "regex":       r"(?<!\d)(?:\+91[\s\-]?)?[6-9]\d{9}(?!\d)",
+        # Universal phone — two patterns to avoid false positives:
+        # 1. International format: must start with + and country code
+        # 2. Label-gated local: requires phone/mobile/tel label
+        # This prevents 12-digit Aadhaar numbers being matched as phones.
+        "regex":       r"(?:"
+                       r"\+\d{1,3}[\s\-.]?(?:\(0?\d{1,4}\)[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
+                       r"|(?i)(?:phone|mobile|tel|ph|mob|contact)\s*[:\-]?\s*(?:\+\d{1,3}[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
+                       r")(?!\d)",
     },
 
     # ── Geo ───────────────────────────────────────────────────────────────────
@@ -378,6 +413,16 @@ PII_TYPES: list[PIIType] = [
         "category":    Category.GEO,
         "sensitivity": Sensitivity.LOW,
         "regex":       "",   # detected by GLiNER / Presidio LOCATION
+    },
+
+    # ── Medication (detected by LLM + post-processor drug canonicalization) ─────
+    {
+        "id":          "medication",
+        "name":        "Medication / Drug Name",
+        "description": "Specific pharmaceutical drug or brand-name medication",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       "",   # detected by LLM and post-processor drug ontology
     },
 
     # ── Other ─────────────────────────────────────────────────────────────────

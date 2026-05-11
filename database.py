@@ -7,14 +7,18 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 # ── Engine ────────────────────────────────────────────────────────────────────
+_is_sqlite = Config.SQLALCHEMY_DATABASE_URI.startswith("sqlite")
+
 engine = create_engine(
     Config.SQLALCHEMY_DATABASE_URI,
     echo=Config.SQLALCHEMY_ECHO,
-    # For SQLite in dev: allow use across threads (FastAPI creates threads
-    # via run_in_threadpool). Ignored for other dialects.
-    connect_args={"check_same_thread": False}
-    if Config.SQLALCHEMY_DATABASE_URI.startswith("sqlite")
-    else {},
+    connect_args={"check_same_thread": False} if _is_sqlite else {},
+    # Pool limits — prevent connection storms under load.
+    # SQLite uses StaticPool so pool_size/max_overflow are ignored for it.
+    pool_size=5,
+    max_overflow=10,
+    pool_recycle=1800,   # recycle connections every 30 min (avoids stale TCP)
+    pool_pre_ping=True,  # validate connections before use
 )
 
 # ── Session factory ───────────────────────────────────────────────────────────

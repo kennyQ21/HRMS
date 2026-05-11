@@ -1,0 +1,46 @@
+{
+  "description": "Ground truth manifest for PII detection pipeline validation",
+  "version": "1.0",
+  "fixtures": {
+    "sample_employee.txt": {
+      "expected_piis": {
+        "EMAIL": 1,
+        "PHONE": 1,
+        "PASSPORT": 1,
+        "PERSON": 1
+      },
+      "content_hash": "ground_truth_text_sample"
+    },
+    "sample_contact.csv": {
+      "expected_piis": {
+        "EMAIL": 2,
+        "PHONE": 2,
+        "NAME": 2
+      },
+      "content_hash": "ground_truth_csv_sample"
+    },
+    "sample_financial.txt": {
+      "expected_piis": {
+        "PAN": 1,
+        "AADHAAR": 1,
+        "CREDIT_CARD": 1,
+        "CVV": 1,
+        "EXPIRY": 1
+      },
+      "content_hash": "ground_truth_financial_sample"
+    },
+    "sample_multilingual.txt": {
+      "expected_piis": {
+        "EMAIL": 1,
+        "PHONE": 1
+      },
+      "content_hash": "ground_truth_multilingual_sample"
+    }
+  },
+  "validation_rules": {
+    "strict_mode": false,
+    "min_confidence": 0.5,
+    "allow_partial_match": true,
+    "tolerance": 0.2
+  }
+}

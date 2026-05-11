@@ -1,10 +1,12 @@
 """
-FastAPI application entry-point.
+Vault Migration Service — FastAPI entry-point.
 
-Replaces the Flask app.py.
+Single endpoint:  POST /scan-file
 """
+from __future__ import annotations
 
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -13,41 +15,120 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth import verify_token
 from config import UPLOADS_DIR
 from database import Base, engine
-from routers import connections, data, dashboard, files, redact, scan_connector, scans
+from routers.scan import router as scan_router
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-)
+
+# ── Terminal logging — clear, colourised, stage-friendly ─────────────────────
+
+class _StageFormatter(logging.Formatter):
+    """
+    Adds colour to log levels so pipeline stages are easy to follow
+    in the terminal even without a log viewer.
+
+        grey   = DEBUG
+        white  = INFO
+        yellow = WARNING
+        red    = ERROR / CRITICAL
+    """
+    _GREY    = "\x1b[38;5;245m"
+    _WHITE   = "\x1b[0m"
+    _YELLOW  = "\x1b[33m"
+    _RED     = "\x1b[31;1m"
+    _RESET   = "\x1b[0m"
+
+    _COLOURS = {
+        logging.DEBUG:    _GREY,
+        logging.INFO:     _WHITE,
+        logging.WARNING:  _YELLOW,
+        logging.ERROR:    _RED,
+        logging.CRITICAL: _RED,
+    }
+
+    _FMT = "%(asctime)s  %(levelname)-8s  %(message)s"
+
+    def format(self, record: logging.LogRecord) -> str:
+        colour = self._COLOURS.get(record.levelno, self._WHITE)
+        formatter = logging.Formatter(
+            fmt=f"{colour}{self._FMT}{self._RESET}",
+            datefmt="%H:%M:%S",
+        )
+        return formatter.format(record)
+
+
+def _setup_logging():
+    handler = logging.StreamHandler()
+    handler.setFormatter(_StageFormatter())
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    root.addHandler(handler)
+
+    # Silence noisy third-party loggers
+    for noisy in ("uvicorn.access", "httpx", "httpcore",
+                  "ppocr", "paddle", "PIL", "matplotlib",
+                  "presidio_analyzer", "presidio-analyzer",
+                  "transformers.tokenization_utils_base"):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
+
+    # Keep uvicorn error logs visible
+    logging.getLogger("uvicorn.error").setLevel(logging.INFO)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
-# ── Lifespan: create DB tables on startup ─────────────────────────────────────
+# ── OCR warm-up ───────────────────────────────────────────────────────────────
+
+def _warm_ocr():
+    """Load PaddleOCR mobile models into RAM at startup (background thread)."""
+    try:
+        logger.info("── OCR warm-up: loading PaddleOCR mobile models …")
+        from services.ocr_engine import _get_ocr
+        _get_ocr()
+        logger.info("── OCR warm-up complete ✓")
+    except Exception as exc:
+        logger.warning("── OCR warm-up failed (non-fatal): %s", exc)
+
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting up — ensuring DB tables exist...")
+    logger.info("═" * 60)
+    logger.info("  Vault Migration Service  —  starting up")
+    logger.info("═" * 60)
+
     Base.metadata.create_all(bind=engine)
-    logger.info("DB tables ready.")
+    logger.info("  DB tables   ✓")
+
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Uploads directory ready: %s", UPLOADS_DIR.resolve())
+    logger.info("  Uploads dir ✓  (%s)", UPLOADS_DIR.resolve())
+
+    threading.Thread(target=_warm_ocr, daemon=True, name="ocr-warmup").start()
+
+    logger.info("  Endpoint    →  POST /scan-file")
+    logger.info("  Docs        →  http://localhost:8000/docs")
+    logger.info("═" * 60)
+
     yield
-    logger.info("Shutting down.")
+
+    logger.info("═" * 60)
+    logger.info("  Vault Migration Service  —  shutting down")
+    logger.info("═" * 60)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
+
 app = FastAPI(
     title="Vault Migration Service",
-    description=(
-        "Connects to SQL/Mongo databases, parses files, "
-        "detects PII, and migrates data to Vault."
-    ),
-    version="2.0.0",
+    description="Upload a file → detect PII → receive structured JSON.",
+    version="3.0.0",
     lifespan=lifespan,
     dependencies=[Depends(verify_token)],
 )
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,18 +137,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(connections.router)
-app.include_router(data.router)
-app.include_router(scans.router)
-app.include_router(files.router)
-app.include_router(redact.router)
-app.include_router(scan_connector.router)
-app.include_router(dashboard.router)
+app.include_router(scan_router)
 
 
 # ── Dev entrypoint ────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_dirs=[".", "routers", "services", "parsers", "utils"],
+        reload_excludes=["venv", "uploads", "debug", "results", "__pycache__", "*.pyc"],
+        log_config=None,   # use our own logging setup, not uvicorn's default
+    )

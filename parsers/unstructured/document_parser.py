@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
-import subprocess
-import sys
 import tempfile
 from typing import Any, Dict, List
 
@@ -12,63 +9,25 @@ from ..base import BaseParser
 
 logger = logging.getLogger(__name__)
 
-# Absolute path to the OCR worker script so imports work regardless of cwd.
-_OCR_WORKER = os.path.join(
-    os.path.dirname(__file__), "..", "..", "services", "ocr_worker.py"
-)
 
-
-def _run_ocr_subprocess(
-    img_paths: List[str],
-    with_boxes: bool = False,
-    timeout: int = 180,
-) -> List[dict]:
+def _run_ocr(img_paths: List[str], with_boxes: bool = False) -> List[dict]:
     """
-    Spawn the OCR worker in a child process and return its results.
+    In-process OCR via ocr_worker.process_images().
 
-    The worker loads Tesseract, processes every image in *img_paths*, then
-    exits.  If the worker crashes the child dies but this process is
-    unaffected; we return an empty-text entry for every image so the scan
-    still completes without killing the service.
+    PaddleOCR models are loaded once per process (singleton in ocr_engine.py)
+    and reused for all subsequent calls — no subprocess spawning, no model
+    reload overhead.
 
-    Returns a list of dicts, one per path:
-        {"text": str, "lines": [[text, bbox], ...]}
+    Returns one dict per path:  {"text": str, "lines": [[text, bbox], ...]}
     """
     if not img_paths:
         return []
-
-    cmd = [sys.executable, _OCR_WORKER]
-    if with_boxes:
-        cmd.append("--boxes")
-    cmd.extend(img_paths)
-
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            results = json.loads(proc.stdout.strip())
-            # Log any per-image errors the worker caught internally
-            for img, r in zip(img_paths, results):
-                if r.get("error"):
-                    logger.error("OCR worker error for %s: %s", img, r["error"])
-            return results
-        # Non-zero exit = crash or error; log stderr for diagnostics
-        logger.error(
-            "OCR worker exited %d — images: %s\nstderr: %s",
-            proc.returncode,
-            img_paths,
-            proc.stderr[-500:] if proc.stderr else "",
-        )
-    except subprocess.TimeoutExpired:
-        logger.error("OCR worker timed out after %ds for images: %s", timeout, img_paths)
+        from services.ocr_worker import process_images
+        return process_images(img_paths, with_boxes=with_boxes)
     except Exception as exc:
-        logger.error("OCR subprocess error: %s", exc)
-
-    return [{"text": "", "lines": []} for _ in img_paths]
+        logger.error("OCR failed: %s", exc)
+        return [{"text": "", "lines": []} for _ in img_paths]
 
 
 # ── DocumentParser ────────────────────────────────────────────────────────────
@@ -266,7 +225,7 @@ class PDFParser(BaseParser):
                     tmp_paths.append(f.name)
                 pil_img.save(tmp_paths[-1])
 
-            results = _run_ocr_subprocess(tmp_paths, with_boxes=False)
+            results = _run_ocr(tmp_paths, with_boxes=False)
             page_texts = [r.get("text", "") for r in results]
             return "\n\n".join(t for t in page_texts if t)
 
@@ -289,7 +248,7 @@ class ImageParser(PDFParser):
     """
 
     def parse(self, file_path: str) -> Dict[str, Any]:
-        results = _run_ocr_subprocess([file_path], with_boxes=False)
+        results = _run_ocr([file_path], with_boxes=False)
         text = results[0].get("text", "") if results else ""
         return {
             "data": [{"content": text}],
@@ -307,7 +266,7 @@ class ImageParser(PDFParser):
         bbox coords are in original-image pixel space (the worker handles
         the resize-and-scale-back internally).
         """
-        results = _run_ocr_subprocess([file_path], with_boxes=True)
+        results = _run_ocr([file_path], with_boxes=True)
         data = results[0] if results else {"text": "", "lines": []}
         text = data.get("text", "")
         # Worker returns [[text_str, bbox_poly], ...]; convert to (text, bbox) tuples.

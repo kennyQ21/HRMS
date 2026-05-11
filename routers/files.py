@@ -322,7 +322,8 @@ def _scan_file_blocking(
         if len(all_results) == 1:
             single = all_results[0].get("scan_result", {})
             single["file_count"] = 1
-            single["results"] = all_results
+            # Do NOT embed all_results here — scan_result inside it references
+            # `single` itself, creating a circular dict that breaks serialization.
             return single
 
         return {

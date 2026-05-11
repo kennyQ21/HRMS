@@ -21,6 +21,7 @@ GLiNER label → internal PII id mapping is defined in GLINER_LABEL_MAP below.
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from typing import Any, Optional
 
@@ -29,8 +30,38 @@ from .base_engine import BaseEngine, PIIMatch
 logger = logging.getLogger(__name__)
 
 # Default model — balanced quality vs memory (~370 MB on disk)
-# Swap for "urchade/gliner_large-v2.1" for higher accuracy at the cost of speed
 _GLINER_MODEL_ID = "urchade/gliner_mediumv2.1"
+
+# Per-type minimum confidence — raised from the old flat 0.40 to eliminate
+# junk like "Yes", "Sure", "patient" being detected as names.
+_PER_TYPE_MIN_SCORE: dict[str, float] = {
+    "name":                    0.75,
+    "organization":            0.70,
+    "diagnosis":               0.80,
+    "address":                 0.65,
+    "city":                    0.65,
+    "occupation":              0.68,
+    "nationality":             0.65,
+    "allergies":               0.72,
+    "prescription":            0.65,
+    "treatment_history":       0.70,
+    "educational_qualification": 0.75,
+    "insurance_provider":      0.70,
+}
+_DEFAULT_MIN_SCORE: float = 0.60   # floor for any unlisted type
+
+# Single-token stopwords that GLiNER must never emit as names
+_NAME_STOPWORDS: frozenset[str] = frozenset({
+    "yes", "no", "sure", "okay", "ok", "yeah", "yep", "nope",
+    "right", "correct", "exactly", "absolutely", "definitely", "well",
+    "patient", "patients", "client", "clients", "respondent", "respondents",
+    "individual", "individuals", "person", "people", "member", "members",
+    "user", "users", "employee", "employees", "staff",
+    "interviewer", "interviewee", "speaker", "narrator", "host", "guest",
+    "doctor", "nurse", "physician", "pharmacist", "provider", "prescriber",
+    "i", "me", "my", "we", "our", "you", "your", "they", "them", "their",
+    "it", "he", "she", "him", "her", "this", "that",
+})
 
 # Maps GLiNER natural-language labels → MASTER_PIIS internal ids
 GLINER_LABEL_MAP: dict[str, str] = {
@@ -121,16 +152,14 @@ class GLiNEREngine(BaseEngine):
         self,
         text: str,
         labels: Optional[list[str]] = None,
-        threshold: float = _MIN_SCORE,
+        threshold: float = _DEFAULT_MIN_SCORE,
         **kwargs: Any,
     ) -> list[PIIMatch]:
         """
-        Run GLiNER over *text* with the configured label set.
+        Run GLiNER over *text* with per-type confidence thresholds.
 
-        Args:
-            text:      Input text (post-normalisation).
-            labels:    Override default GLINER_LABELS if needed.
-            threshold: Minimum confidence score to keep a hit.
+        Per-type thresholds replace the old flat threshold — this eliminates
+        junk like stopwords and sentence fragments being detected as names.
         """
         model = _load_model()
         if model is None:
@@ -140,6 +169,9 @@ class GLiNEREngine(BaseEngine):
         active_labels = labels or GLINER_LABELS
 
         # GLiNER has a 384-token limit; chunk large texts to avoid truncation
+        # Use the lowest per-type threshold as the model-level floor so we
+        # don't discard borderline hits for types with higher limits.
+        model_threshold = min(_PER_TYPE_MIN_SCORE.values()) if _PER_TYPE_MIN_SCORE else threshold
         chunks = _chunk_text(text, max_chars=1500)
         all_matches: list[PIIMatch] = []
         offset = 0
@@ -147,7 +179,7 @@ class GLiNEREngine(BaseEngine):
         for chunk in chunks:
             try:
                 entities = model.predict_entities(
-                    chunk, active_labels, threshold=threshold
+                    chunk, active_labels, threshold=model_threshold
                 )
             except Exception as exc:
                 logger.warning("[GLINER] Prediction error on chunk: %s", exc)
@@ -157,10 +189,8 @@ class GLiNEREngine(BaseEngine):
             for ent in entities:
                 internal_id = GLINER_LABEL_MAP.get(ent["label"].lower())
                 if not internal_id:
-                    offset_label = ent["label"].lower()
-                    # Fuzzy fallback: check if any label key is a substring
                     for label_key, iid in GLINER_LABEL_MAP.items():
-                        if label_key in offset_label or offset_label in label_key:
+                        if label_key in ent["label"].lower() or ent["label"].lower() in label_key:
                             internal_id = iid
                             break
                 if not internal_id:
@@ -170,11 +200,59 @@ class GLiNEREngine(BaseEngine):
                 if not value or len(value) < 2:
                     continue
 
+                score = float(ent.get("score", model_threshold))
+
+                # ── Per-type confidence gate ──────────────────────────────────
+                min_score = _PER_TYPE_MIN_SCORE.get(internal_id, _DEFAULT_MIN_SCORE)
+                if score < min_score:
+                    continue
+
+                # ── Name-specific guards ──────────────────────────────────────
+                if internal_id == "name":
+                    val_lower = value.lower()
+                    # Reject stopwords
+                    if val_lower in _NAME_STOPWORDS:
+                        continue
+                    # Reject all-lowercase single words (not proper nouns)
+                    words = value.split()
+                    if len(words) == 1 and value == value.lower():
+                        continue
+                    # Reject sentences (>5 words or mostly lowercase)
+                    if len(words) > 5:
+                        continue
+                    lowercase_ratio = sum(1 for w in words if w and w[0].islower()) / len(words)
+                    if lowercase_ratio > 0.5:
+                        continue
+
+                # ── Organization guards ───────────────────────────────────────
+                elif internal_id == "organization":
+                    words = value.split()
+                    if len(words) > 8:
+                        continue
+                    # Reject strings that look like sentences
+                    _SENT_WORDS = {"gets", "goes", "routes", "stops", "sends",
+                                   "thinks", "means", "really", "there", "more",
+                                   "anybody", "something", "everything", "nothing"}
+                    if any(w.lower() in _SENT_WORDS for w in words):
+                        continue
+
+                # ── Diagnosis guards ──────────────────────────────────────────
+                elif internal_id == "diagnosis":
+                    # Reject non-clinical strings
+                    _CLINICAL = re.compile(
+                        r"(?i)\b(?:disease|disorder|syndrome|condition|infection|"
+                        r"cancer|diabetes|hypertension|arthritis|sclerosis|lupus|"
+                        r"psoriasis|colitis|anemia|neuropathy|hepatitis|asthma|"
+                        r"copd|eczema|melanoma|tumor|autoimmune|chronic|acute|"
+                        r"malignancy|diagnosed|diagnosis)\b"
+                    )
+                    if not _CLINICAL.search(value) and len(value.split()) > 3:
+                        continue
+
                 start = ent.get("start", -1)
                 end   = ent.get("end", -1)
                 abs_start = (start + offset) if start >= 0 else -1
                 abs_end   = (end + offset) if end >= 0 else -1
-
                 ctx_start = max(0, start - 40)
                 ctx_end   = min(len(chunk), (end if end >= 0 else start) + 40)
                 context   = chunk[ctx_start:ctx_end].strip()
@@ -183,7 +261,7 @@ class GLiNEREngine(BaseEngine):
                     pii_type=internal_id,
                     value=value,
                     source="gliner",
-                    confidence=float(ent.get("score", threshold)),
+                    confidence=score,
                     start=abs_start,
                     end=abs_end,
                     context=context,

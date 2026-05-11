@@ -29,11 +29,10 @@ logger = logging.getLogger(__name__)
 
 # Engine trust weights (higher = more trusted as a source)
 ENGINE_WEIGHTS: dict[str, float] = {
-    "regex":   1.0,   # deterministic — highest trust
-    "otter":   0.85,  # structural + key-value
-    "gliner":  0.80,  # semantic NER
-    "llm":     0.75,  # semantic reasoning
-    "presidio": 0.80, # legacy Presidio NER
+    "regex":  1.00,   # deterministic — highest trust
+    "gliner": 0.85,   # GLiNER semantic NER — English
+    "llm":    0.78,   # Qwen 0.5B — multilingual + medical
+    # otter and presidio removed
 }
 
 # For these types, prefer exact-match dedup (normalise digits only)

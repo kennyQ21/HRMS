@@ -1,26 +1,24 @@
 """
 services/engines/llm_engine.py
 --------------------------------
-Layer 4: Ollama / Qwen Semantic Reasoning Engine.
+Qwen 0.5B multilingual PII engine (via Ollama).
 
-Qwen acts as a FIRST-CLASS detection engine — not a fallback.
-It handles PII types that are fundamentally semantic in nature and cannot be
-reliably extracted with regex or NER alone:
+When it runs:
+  - Non-English / Indic / foreign script text
+  - Medical documents (any language)
+  - Mixed-language documents
 
-  • Medical diagnosis / treatment / allergies (narrative text)
-  • Occupation / job title inferred from context
-  • Educational qualifications inferred from descriptions
-  • OCR-corrupted labels ("P4ssport No:" → passport)
-  • Inferred / implicit PII ("completed Masters at IIT" → educational_qualification)
-  • Insurance provider names in free text
+When it does NOT run:
+  - Pure English text  →  GLiNER handles it
+  - Structured IDs     →  Regex handles it
+  - Short text (<20 words)
 
-Architecture:
-  - Uses Ollama REST API (http://localhost:11434) — no extra Python package required
-  - Model: qwen2.5:7b-instruct (confirmed present on this machine)
-  - Text is chunked so each call stays within the model context window
-  - Structured JSON extraction via prompt engineering + response parsing
-  - Timeout + retry logic to keep latency predictable
-  - Falls back gracefully if Ollama is unreachable
+Qwen 0.5B constraints (important for accuracy):
+  - Constrained extraction: only a targeted list of entity types per call
+  - Small chunks: 512 chars max (reduces hallucination on small model)
+  - Temperature 0.0: fully deterministic
+  - Minimum confidence 0.70 accepted
+  - No unrestricted "extract everything" prompts
 """
 
 from __future__ import annotations
@@ -33,34 +31,44 @@ from typing import Any, Optional
 
 import requests
 
-from constants import LLM_PRIORITY_PII
+from constants import PII_TYPE_MAP
 from .base_engine import BaseEngine, PIIMatch
 
 logger = logging.getLogger(__name__)
 
 _OLLAMA_URL  = "http://localhost:11434/api/generate"
-_MODEL       = "qwen2.5:7b-instruct"
+_MODEL       = "qwen2.5:0.5b"
 _TIMEOUT_SEC = 60
-_MAX_CHARS   = 2000   # max chars per LLM call (fits easily in 7B context)
+_MAX_CHARS   = 512     # small chunks → less hallucination on 0.5B
 
-# PII types the LLM handles best (semantic / inferred / narrative)
-_LLM_TARGET_TYPES = LLM_PRIORITY_PII | {
-    "name", "address", "organization", "occupation", "nationality",
-    "insurance_provider", "educational_qualification",
-}
+# Entity types Qwen targets: semantic + multilingual
+# Do NOT include structured IDs (regex handles them far better)
+_QWEN_ENTITY_TYPES: list[str] = [
+    "name",
+    "address",
+    "organization",
+    "city",
+    "nationality",
+    "occupation",
+    "diagnosis",
+    "allergies",
+    "prescription",
+    "treatment_history",
+    "insurance_provider",
+    "medication",
+]
 
-_EXTRACTION_PROMPT = """\
-You are a PII (Personally Identifiable Information) extraction expert.
-Extract ALL PII entities from the text below.
+# Constrained prompt — targeted list, strict JSON, no free-text extraction
+_PROMPT = """\
+Extract ONLY these entity types from the text:
+{types}
 
-For each entity, return a JSON array of objects with these keys:
-  "type"       - one of: {types}
-  "value"      - the exact text of the entity
-  "confidence" - float 0.0-1.0 (how confident you are)
-  "context"    - short surrounding phrase (max 20 words) explaining why it's PII
-
-Only return the JSON array. No explanation, no markdown, no commentary.
-If no PII is found, return [].
+Rules:
+- Return a JSON array only, no explanation.
+- Each item: {{"type": "<type>", "value": "<exact text>", "confidence": <0.0-1.0>}}
+- Preserve original script (do not transliterate).
+- Minimum confidence: 0.70. Skip uncertain entities.
+- If nothing found, return [].
 
 TEXT:
 {text}
@@ -69,158 +77,178 @@ JSON:"""
 
 
 def _build_prompt(text: str) -> str:
-    types = ", ".join(sorted(_LLM_TARGET_TYPES))
-    return _EXTRACTION_PROMPT.format(types=types, text=text)
+    types = ", ".join(_QWEN_ENTITY_TYPES)
+    return _PROMPT.format(types=types, text=text.strip())
 
 
 def _call_ollama(prompt: str, timeout: int = _TIMEOUT_SEC) -> str:
-    """Send prompt to Ollama and return the raw response string."""
     payload = {
         "model": _MODEL,
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.0,   # deterministic
+            "temperature": 0.0,
             "top_p": 1.0,
-            "num_predict": 1024,
+            "num_predict": 512,
+            "repeat_penalty": 1.1,
         },
     }
     resp = requests.post(_OLLAMA_URL, json=payload, timeout=timeout)
     resp.raise_for_status()
-    data = resp.json()
-    return data.get("response", "")
+    return resp.json().get("response", "")
 
 
-def _parse_llm_response(raw: str) -> list[dict]:
-    """
-    Robustly parse LLM JSON output.
-
-    The model sometimes wraps output in markdown ```json blocks or adds
-    trailing text. We extract the first valid JSON array.
-    """
-    # Strip markdown fences
+def _parse_response(raw: str) -> list[dict]:
+    """Robustly extract JSON array from LLM output."""
     raw = re.sub(r"```(?:json)?", "", raw).strip()
-
-    # Find the first JSON array
-    bracket_start = raw.find("[")
-    bracket_end   = raw.rfind("]")
-    if bracket_start == -1 or bracket_end == -1:
+    start = raw.find("[")
+    end   = raw.rfind("]")
+    if start == -1 or end == -1:
         return []
-
-    json_str = raw[bracket_start: bracket_end + 1]
     try:
-        entities = json.loads(json_str)
-        if isinstance(entities, list):
-            return entities
+        result = json.loads(raw[start:end+1])
+        return result if isinstance(result, list) else []
     except json.JSONDecodeError:
-        # Try line-by-line recovery for partially truncated output
-        lines = json_str.splitlines()
-        fixed = []
-        for line in lines:
-            line = line.rstrip(",")
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    fixed.append(obj)
-            except Exception:
-                continue
-        return fixed
+        pass
+    # Recovery: parse individual objects
+    objects = re.findall(r"\{[^{}]+\}", raw, re.DOTALL)
+    recovered = []
+    for obj_str in objects:
+        try:
+            obj = json.loads(obj_str)
+            if isinstance(obj, dict) and "type" in obj and "value" in obj:
+                recovered.append(obj)
+        except Exception:
+            continue
+    return recovered
 
-    return []
 
+# ── Type normalizer ────────────────────────────────────────────────────────────
+
+_ALIASES: dict[str, str] = {
+    "person_name":        "name",
+    "person":             "name",
+    "full_name":          "name",
+    "medical_condition":  "diagnosis",
+    "disease":            "diagnosis",
+    "illness":            "diagnosis",
+    "condition":          "diagnosis",
+    "allergy":            "allergies",
+    "drug_allergy":       "allergies",
+    "medication":         "medication",
+    "drug":               "medication",
+    "medicine":           "medication",
+    "treatment":          "treatment_history",
+    "procedure":          "treatment_history",
+    "company":            "organization",
+    "employer":           "organization",
+    "job":                "occupation",
+    "job_title":          "occupation",
+    "profession":         "occupation",
+    "role":               "occupation",
+    "city":               "city",
+    "location":           "city",
+    "town":               "city",
+    "insurance":          "insurance_provider",
+}
+
+
+def _normalize_type(raw_type: str) -> str | None:
+    t = raw_type.strip().lower().replace("-", "_").replace(" ", "_")
+    if t in PII_TYPE_MAP:
+        return t
+    if t in _ALIASES:
+        return _ALIASES[t]
+    # Substring match
+    for pid in PII_TYPE_MAP:
+        if pid in t or t in pid:
+            return pid
+    return None
+
+
+# ── Engine ────────────────────────────────────────────────────────────────────
 
 class LLMEngine(BaseEngine):
     """
-    Ollama/Qwen semantic reasoning engine.
-
-    Best for: medical entities, occupations, inferred PII, OCR-corrupted labels.
-    Not needed for: structured IDs (handled by RegexEngine).
+    Qwen 0.5B multilingual PII engine.
+    Only activates for non-English or medical documents.
+    Skips gracefully when Ollama is not running.
     """
 
     name = "llm"
 
     def __init__(self, model: str = _MODEL, ollama_url: str = _OLLAMA_URL):
-        self.model = model
+        self.model      = model
         self.ollama_url = ollama_url
 
     def _is_available(self) -> bool:
-        """Check if Ollama is reachable."""
         try:
-            requests.get(self.ollama_url.replace("/api/generate", "/api/tags"), timeout=2)
-            return True
+            r = requests.get(
+                self.ollama_url.replace("/api/generate", "/api/tags"),
+                timeout=2,
+            )
+            return r.status_code == 200
         except Exception:
             return False
 
     def detect(
         self,
         text: str,
-        target_types: Optional[set[str]] = None,
+        lang=None,    # LangResult from language_detector (optional)
         **kwargs: Any,
     ) -> list[PIIMatch]:
-        """
-        Run Qwen over *text* to extract semantic PII.
 
-        Args:
-            text:         Input text (post-normalisation).
-            target_types: Restrict to a subset of LLM-suited PII types.
-        """
         if not self._is_available():
-            logger.warning("[LLM] Ollama unavailable — skipping semantic pass")
+            logger.warning("[LLM] Ollama not running — skipping multilingual pass")
             return []
 
-        chunks = _chunk_text(text, _MAX_CHARS)
+        chunks      = _chunk_text(text, _MAX_CHARS)
         all_matches: list[PIIMatch] = []
-        offset = 0
+        offset      = 0
 
         for chunk in chunks:
-            chunk_stripped = chunk.strip()
-            if not chunk_stripped:
+            chunk = chunk.strip()
+            if not chunk or len(chunk.split()) < 5:
                 offset += len(chunk)
                 continue
 
-            prompt = _build_prompt(chunk_stripped)
+            prompt = _build_prompt(chunk)
             try:
                 t0  = time.perf_counter()
-                raw = _call_ollama(prompt)
+                raw = _call_ollama(prompt, timeout=_TIMEOUT_SEC)
                 elapsed = (time.perf_counter() - t0) * 1000
-                logger.info("[LLM] Ollama call: %.0f ms, chunk %d chars", elapsed, len(chunk_stripped))
+                logger.info("[LLM] %.0f ms — %d chars", elapsed, len(chunk))
             except requests.Timeout:
-                logger.warning("[LLM] Ollama timed out for chunk of %d chars", len(chunk_stripped))
+                logger.warning("[LLM] Timeout on %d-char chunk", len(chunk))
                 offset += len(chunk)
                 continue
             except Exception as exc:
-                logger.error("[LLM] Ollama call failed: %s", exc)
+                logger.error("[LLM] Call failed: %s", exc)
                 offset += len(chunk)
                 continue
 
-            entities = _parse_llm_response(raw)
-            logger.debug("[LLM] raw entities from chunk: %s", entities)
-
-            for ent in entities:
+            for ent in _parse_response(raw):
                 if not isinstance(ent, dict):
                     continue
-                pii_type   = str(ent.get("type", "")).strip().lower()
+
+                raw_type   = str(ent.get("type", "")).strip()
                 value      = str(ent.get("value", "")).strip()
                 confidence = float(ent.get("confidence", 0.7))
-                context    = str(ent.get("context", "")).strip()
 
-                if not pii_type or not value:
+                if not raw_type or not value or len(value) < 2:
                     continue
-                # Only keep types in MASTER_PIIS
-                from constants import PII_TYPE_MAP
-                if pii_type not in PII_TYPE_MAP:
-                    # Fuzzy: e.g. LLM says "medical_condition" → "diagnosis"
-                    pii_type = _fuzzy_type_match(pii_type)
-                    if not pii_type:
-                        continue
-
-                if target_types and pii_type not in target_types:
+                if confidence < 0.70:
                     continue
 
-                # Try to find the value's position in the chunk
-                pos = chunk_stripped.find(value)
+                pii_type = _normalize_type(raw_type)
+                if not pii_type:
+                    continue
+
+                pos       = chunk.find(value)
                 abs_start = (pos + offset) if pos >= 0 else -1
                 abs_end   = (abs_start + len(value)) if abs_start >= 0 else -1
+
+                language_tag = getattr(lang, "primary_lang", "unknown") if lang else "unknown"
 
                 all_matches.append(PIIMatch(
                     pii_type=pii_type,
@@ -229,75 +257,18 @@ class LLMEngine(BaseEngine):
                     confidence=min(max(confidence, 0.0), 1.0),
                     start=abs_start,
                     end=abs_end,
-                    context=context,
-                    metadata={"model": self.model},
+                    context=chunk[:80],
+                    metadata={"model": self.model, "language": language_tag},
                 ))
 
             offset += len(chunk)
 
-        logger.info("[LLM] %d semantic entities detected", len(all_matches))
+        logger.info("[LLM] %d multilingual entities detected", len(all_matches))
         return all_matches
 
 
-# ── Fuzzy type resolver ────────────────────────────────────────────────────────
-
-_TYPE_ALIASES: dict[str, str] = {
-    "medical condition":            "diagnosis",
-    "medical_condition":            "diagnosis",
-    "disease":                      "diagnosis",
-    "illness":                      "diagnosis",
-    "health condition":             "diagnosis",
-    "allergy":                      "allergies",
-    "drug allergy":                 "allergies",
-    "job":                          "occupation",
-    "job title":                    "occupation",
-    "profession":                   "occupation",
-    "designation":                  "occupation",
-    "role":                         "occupation",
-    "degree":                       "educational_qualification",
-    "qualification":                "educational_qualification",
-    "passport number":              "passport",
-    "insurance number":             "insurance_policy",
-    "policy number":                "insurance_policy",
-    "blood type":                   "blood_group",
-    "medication":                   "prescription",
-    "drug":                         "prescription",
-    "treatment":                    "treatment_history",
-    "procedure":                    "treatment_history",
-    "vaccination":                  "immunization",
-    "vaccine":                      "immunization",
-    "company":                      "organization",
-    "employer":                     "organization",
-    "bank account number":          "bank_account",
-    "account number":               "bank_account",
-    "username":                     "user_id",
-    "login id":                     "user_id",
-    "social security number":       "ssn",
-    "license":                      "driving_license",
-    "driving license":              "driving_license",
-}
-
-
-def _fuzzy_type_match(llm_type: str) -> str | None:
-    """Map an unexpected LLM type string to a known MASTER_PIIS id."""
-    from constants import PII_TYPE_MAP
-
-    normalized = llm_type.lower().replace("-", "_")
-
-    # Direct match
-    if normalized in PII_TYPE_MAP:
-        return normalized
-    # Alias table
-    if normalized in _TYPE_ALIASES:
-        return _TYPE_ALIASES[normalized]
-    # Substring match against known ids
-    for pid in PII_TYPE_MAP:
-        if pid in normalized or normalized in pid:
-            return pid
-    return None
-
-
 def _chunk_text(text: str, max_chars: int) -> list[str]:
+    """Split text into chunks of ≤max_chars, breaking at sentence boundaries."""
     if len(text) <= max_chars:
         return [text]
     chunks: list[str] = []

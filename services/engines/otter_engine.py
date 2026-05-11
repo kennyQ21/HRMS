@@ -130,11 +130,28 @@ class OtterEngine(BaseEngine):
 
     name = "otter"
 
+    # Max word count per entity type emitted by Otter
+    _MAX_VALUE_WORDS: dict[str, int] = {
+        "name": 5, "organization": 8, "city": 3, "address": 20,
+        "dob": 4, "gender": 2, "age": 2, "diagnosis": 10,
+        "prescription": 8, "allergies": 8,
+    }
+    _DEFAULT_MAX_WORDS = 15
+
+    # Values that must never be emitted regardless of label
+    _OTTER_STOPWORDS: frozenset[str] = frozenset({
+        "yes", "no", "sure", "n/a", "na", "none", "unknown", "tbd",
+        "patient", "client", "respondent", "individual", "person",
+        "interviewer", "interviewee", "speaker",
+    })
+
     def detect(self, text: str, **kwargs: Any) -> list[PIIMatch]:
         matches: list[PIIMatch] = []
         matches.extend(self._extract_form_fields(text))
         matches.extend(self._extract_table_rows(text))
-        matches.extend(self._extract_section_context(text))
+        # NOTE: _extract_section_context removed — it promoted entire sentences
+        # (e.g. pharmacy routing text) into diagnosis/name entities, causing
+        # massive false positives on conversational / narrative documents.
         logger.info("[OTTER] %d structured entities extracted", len(matches))
         return matches
 
@@ -165,10 +182,27 @@ class OtterEngine(BaseEngine):
             # Match label against known form fields
             for pattern, pii_type in _COMPILED_FORM_FIELDS:
                 if pattern.search(label_raw):
+                    # ── Value guards ──────────────────────────────────────────
+                    val_lower = value_raw.strip().lower()
+
+                    # Reject stopwords
+                    if val_lower in self._OTTER_STOPWORDS:
+                        break
+
+                    # Reject over-length values (sentences masquerading as entities)
+                    word_count = len(value_raw.split())
+                    max_words  = self._MAX_VALUE_WORDS.get(pii_type, self._DEFAULT_MAX_WORDS)
+                    if word_count > max_words:
+                        break
+
+                    # Reject values that look like section headers or prose
+                    if value_raw.isupper() and word_count > 4:
+                        break
+
                     start = text.find(value_raw)
                     matches.append(PIIMatch(
                         pii_type=pii_type,
-                        value=value_raw[:200],   # cap at 200 chars
+                        value=value_raw[:200],
                         source="otter",
                         confidence=0.80,
                         start=start,

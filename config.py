@@ -27,4 +27,5 @@ class Config:
     
     # Flask-SQLAlchemy configuration
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ECHO = DEBUG 
+    # Opt-in via LOG_SQL=true — never echo by default (floods stdout)
+    SQLALCHEMY_ECHO = os.getenv("LOG_SQL", "false").lower() == "true"
