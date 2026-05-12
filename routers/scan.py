@@ -69,6 +69,54 @@ def _is_pdf_protected(path: str) -> bool:
         return False
 
 
+# ── Post-OCR document classifier ─────────────────────────────────────────────
+
+import re as _re
+
+# Each entry: (doc_type, list_of_required_signal_patterns)
+# ALL patterns in the list must match for the doc_type to be assigned.
+# Patterns are case-insensitive strings searched in the OCR text.
+_DOC_SIGNALS: list[tuple[str, list[str]]] = [
+    ("aadhaar_card", [
+        r"(?:unique\s+identification\s+authority|uidai|आधार|aadhaar)",
+        r"(?:government\s+of\s+india|भारत\s+सरकार)",
+    ]),
+    ("pan_card", [
+        r"(?:income\s+tax\s+department|permanent\s+account\s+number)",
+        r"(?:govt\.?\s+of\s+india|government\s+of\s+india)",
+    ]),
+    ("voter_id", [
+        r"(?:election\s+commission|elector\s+photo\s+identity|epic)",
+    ]),
+    ("driving_license", [
+        r"(?:driving\s+licen[cs]e|motor\s+vehicles?\s+act|transport\s+department)",
+        r"(?:dl\s+no|licence\s+no|validity)",
+    ]),
+    ("passport", [
+        r"(?:republic\s+of|ministry\s+of\s+external\s+affairs|passport)",
+        r"(?:place\s+of\s+birth|date\s+of\s+issue|date\s+of\s+expiry)",
+    ]),
+]
+_DOC_SIGNAL_PATTERNS: list[tuple[str, list[_re.Pattern]]] = [
+    (dt, [_re.compile(p, _re.IGNORECASE) for p in patterns])
+    for dt, patterns in _DOC_SIGNALS
+]
+
+
+def _classify_from_ocr_text(text: str, current_type: str) -> str:
+    """
+    Refine document type from OCR-extracted text using multiple corroborating
+    layout signals. Returns current_type unchanged if no strong match found.
+
+    Requires ALL patterns in a rule to match — prevents single-entity
+    false positives (e.g. Aadhaar number in a bank statement).
+    """
+    for doc_type, patterns in _DOC_SIGNAL_PATTERNS:
+        if all(p.search(text) for p in patterns):
+            return doc_type
+    return current_type
+
+
 # ── Stage logger ──────────────────────────────────────────────────────────────
 
 class StageLogger:
@@ -197,6 +245,17 @@ def _run_pipeline(
         sl.stage("POST-PROCESS",
                  f"{len(resolved_raw)} raw → {len(resolved)} kept")
 
+        # ── 5b. Post-OCR document type refinement ────────────────────────────
+        # For images and scanned PDFs the ingestion dispatcher cannot read
+        # content before OCR runs, so doc_type defaults to "generic".
+        # After OCR we have the full text — refine using STRONG textual
+        # signals that are unique to specific document layouts.
+        # NOTE: entity presence alone is NOT sufficient — an Aadhaar number
+        # in a bank statement does NOT make it an Aadhaar card.
+        if plan.doc_type in ("generic", "id") and working_text:
+            plan.doc_type = _classify_from_ocr_text(working_text, plan.doc_type)
+        sl.stage("CLASSIFY", f"doc_type={plan.doc_type}")
+
         # ── 5. Persist to DB ──────────────────────────────────────────────────
         counts = resolved_to_pii_counts(resolved)
         primary_type, primary_count, _ = select_primary_from_resolved(resolved)
@@ -233,8 +292,9 @@ def _run_pipeline(
                  f"passed={validation.passed}  issues={len(validation.issues)}")
 
         # ── 7. Build output ───────────────────────────────────────────────────
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        result     = build_scan_response(
+        elapsed_ms   = (time.perf_counter() - t0) * 1000
+        lang_code    = lang.primary_lang if lang else "en"
+        result       = build_scan_response(
             scan_id=scan.id,
             filename=filename,
             resolved_entities=resolved,
@@ -243,6 +303,7 @@ def _run_pipeline(
             ingestion_plan=plan,
             validation_report=validation,
             elapsed_ms=elapsed_ms,
+            language=lang_code,
         )
         sl.footer(len(resolved))
         return result
@@ -408,24 +469,22 @@ async def status():
     }
 
 
-# ── POST /scan-file ────────────────────────────────────────────────────────────
+# ── POST /scan-file ───────────────────────────────────────────────────────────
 
 @router.post("/scan-file", summary="Scan a file for PII")
 async def scan_file(
-    file:     UploadFile         = File(..., description="File to scan (PDF, DOCX, JPG, CSV, XLSX, ZIP, …)"),
-    password: Optional[str]      = Form(None, description="Password for encrypted PDF or ZIP"),
-    db:       Session            = Depends(get_db),
+    file:     UploadFile    = File(..., description="File to scan"),
+    password: Optional[str] = Form(None, description="Password for encrypted PDF/ZIP"),
+    db:       Session       = Depends(get_db),
 ):
     """
-    Upload any supported file and receive a structured JSON report of all
-    PII entities detected inside it.
+    Upload any supported file → receive document-centric PII JSON.
 
     **Supported formats**: PDF · DOCX · DOC · ODT · RTF · CSV · XLSX · XLS ·
-    JPG · PNG · BMP · TIFF · WEBP · MDB · SQL · ZIP (archive of the above)
+    JPG · PNG · BMP · TIFF · WEBP · MDB · SQL · ZIP
 
-    **Returns**: unified PII JSON with `entities`, `pii_entities` (grouped),
-    `confidence_scores`, `document_metadata`, `processing_metrics`, and
-    `validation_results`.
+    **Returns**: `document`, `structured_fields`, `entities`, `ocr`,
+    `validation`, `redaction`.
     """
     logger.info("▷ Received: %s  (%.1f KB)",
                 file.filename, len(await file.read()) / 1024)
@@ -433,6 +492,148 @@ async def scan_file(
     file_bytes = await file.read()
 
     return await run_in_threadpool(
-        _scan_blocking,
-        file_bytes, file.filename, password, db,
+        _scan_blocking, file_bytes, file.filename, password, db,
+    )
+
+
+# ── POST /redact-file ─────────────────────────────────────────────────────────
+
+def _redact_blocking(
+    file_bytes: bytes,
+    original_filename: str,
+    password: Optional[str],
+    redaction_type: str,
+    db,
+) -> dict:
+    """Run full scan pipeline then apply redaction. Returns scan JSON + base64 redacted file."""
+    import base64
+    from services.redaction_engine import RedactionEngine, REDACT_FULL, REDACT_PARTIAL, REDACT_CONTEXTUAL, REDACT_MASK
+
+    # ── Run the scan pipeline first ───────────────────────────────────────────
+    scan_result = _scan_blocking(file_bytes, original_filename, password, db)
+    if scan_result.get("status") == "error":
+        return scan_result
+
+    # ── Apply redaction ───────────────────────────────────────────────────────
+    import tempfile
+    rtype_map = {
+        "full": REDACT_FULL,
+        "partial": REDACT_PARTIAL,
+        "contextual": REDACT_CONTEXTUAL,
+        "mask": REDACT_MASK,
+    }
+    rtype = rtype_map.get(redaction_type, REDACT_CONTEXTUAL)
+
+    # Re-run pipeline to get resolved entities for redaction
+    # (scan_blocking already ran; we reconstruct entities from the JSON output)
+    entities_raw = scan_result.get("entities", [])
+
+    # Write file to temp path for redaction engine
+    suffix = os.path.splitext(original_filename)[1]
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        # Build minimal entity objects that redaction engine accepts
+        from services.entity_resolution import ResolvedEntity
+        entities = []
+        for e in entities_raw:
+            span = e.get("span") or {}
+            entities.append(ResolvedEntity(
+                pii_type=e["type"],
+                value=e["value"],
+                confidence=e["confidence"],
+                sources=[e.get("source", "regex")],
+                start=span.get("start", -1),
+                end=span.get("end", -1),
+                sensitivity="High",
+            ))
+
+        engine = RedactionEngine()
+        result = engine.redact(
+            file_path=tmp_path,
+            filename=original_filename,
+            entities=entities,
+            redaction_type=rtype,
+        )
+
+        redacted_b64 = base64.b64encode(result.redacted_bytes).decode("utf-8")
+        redacted_filename = f"redacted_{original_filename}"
+
+        # Content type lookup
+        ext = suffix.lower()
+        ct_map = {
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".csv": "text/csv",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png",
+        }
+        content_type = ct_map.get(ext, "application/octet-stream")
+
+        # Update the redaction map in the scan result
+        scan_result["redaction"] = {
+            "map":   result.redaction_map,
+            "count": result.entity_count,
+        }
+
+        return {
+            "status":       "success",
+            "scan":         scan_result,
+            "redacted_file": {
+                "filename":     redacted_filename,
+                "format":       result.format,
+                "content_type": content_type,
+                "data_base64":  redacted_b64,
+                "entities_redacted": result.entity_count,
+                "redaction_type": redaction_type,
+                "error": result.error,
+            },
+        }
+
+    except Exception as exc:
+        logger.exception("redact_file error")
+        return {"status": "error", "message": str(exc)}
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+@router.post("/redact-file", summary="Scan and redact a file")
+async def redact_file(
+    file:            UploadFile    = File(..., description="File to scan and redact"),
+    password:        Optional[str] = Form(None,          description="Password for encrypted PDF/ZIP"),
+    redaction_type:  str           = Form("contextual",  description="full | partial | contextual | mask"),
+    db:              Session       = Depends(get_db),
+):
+    """
+    Upload any supported file → scan for PII → return:
+    1. Full scan JSON (same as `/scan-file`)
+    2. Redacted file as **base64** in `redacted_file.data_base64`
+
+    **Redaction types**:
+    - `contextual` *(default)* — replaces value with `[PERSON_NAME]`, `[AADHAAR]` etc.
+    - `full`    — replaces with `XXXXXXXXXXXX`
+    - `partial` — masks middle digits: `XXXX-XXXX-1234`
+    - `mask`    — black rectangle overlay (PDF only)
+
+    **Decode the redacted file** (Python example):
+    ```python
+    import base64
+    data = response["redacted_file"]["data_base64"]
+    with open("redacted.pdf", "wb") as f:
+        f.write(base64.b64decode(data))
+    ```
+    """
+    logger.info("▷ Redact: %s  type=%s", file.filename, redaction_type)
+    await file.seek(0)
+    file_bytes = await file.read()
+
+    return await run_in_threadpool(
+        _redact_blocking,
+        file_bytes, file.filename, password, redaction_type, db,
     )
