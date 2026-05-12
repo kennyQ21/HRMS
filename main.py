@@ -148,8 +148,7 @@ async def lifespan(app: FastAPI):
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("  Uploads dir ✓  (%s)", UPLOADS_DIR.resolve())
 
-    threading.Thread(target=_warm_ocr,      daemon=True, name="ocr-warmup").start()
-    threading.Thread(target=_ensure_ollama, daemon=True, name="ollama-start").start()
+    threading.Thread(target=_warm_ocr, daemon=True, name="ocr-warmup").start()
 
     logger.info("  Endpoint    →  POST /scan-file")
     logger.info("  Docs        →  http://localhost:8000/docs")

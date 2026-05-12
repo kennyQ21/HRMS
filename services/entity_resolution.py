@@ -73,19 +73,68 @@ class ResolvedEntity:
     metadata:    dict = field(default_factory=dict)
 
 
-def resolve(engine_results: list[EngineResult]) -> list[ResolvedEntity]:
+def resolve(
+    engine_results: list[EngineResult],
+    source_text: str = "",
+) -> list[ResolvedEntity]:
     """
     Merge and deduplicate all engine outputs into a canonical entity list.
 
     Steps:
       1. Collect all PIIMatch objects from every engine result.
-      2. Group by pii_type.
-      3. Within each type: span-merge, deduplicate by value, fuse confidence.
-      4. Sort by sensitivity (Critical → Low) then fused confidence.
+      2. Span-ground check — discard entities whose value cannot be found in
+         source_text. This is the grounding validator: it prevents hallucinated
+         entities (values invented by generative models or OCR misreads that
+         don't appear anywhere in the actual document text) from leaking into
+         compliance output.
+      3. Group by pii_type.
+      4. Within each type: span-merge, deduplicate by value, fuse confidence.
+      5. Sort by sensitivity (Critical → Low) then fused confidence.
+
+    Args:
+        engine_results: Outputs from all detection engines.
+        source_text:    Normalised document text (used for grounding check).
+                        If empty, grounding is skipped (backward compat).
     """
     all_matches: list[PIIMatch] = []
     for er in engine_results:
         all_matches.extend(er.matches)
+
+    if not all_matches:
+        return []
+
+    # ── Span grounding check ──────────────────────────────────────────────────
+    # Every entity value must be a substring of the source document text.
+    # Discard any match whose value cannot be found — these are hallucinations,
+    # OCR reconstruction errors, or model training-data leakage.
+    # Regex matches already have confirmed spans so we skip them (fast path).
+    # Numeric IDs are compared digit-only to handle space/dash formatting.
+    if source_text:
+        src_lower   = source_text.lower()
+        src_digits  = re.sub(r"\D", "", source_text)
+        grounded: list[PIIMatch] = []
+        skipped = 0
+        for m in all_matches:
+            if m.source == "regex":
+                grounded.append(m)   # regex spans are always grounded
+                continue
+            v = m.value.strip()
+            v_lower = v.lower()
+            # Standard substring check
+            if v_lower in src_lower:
+                grounded.append(m)
+                continue
+            # Digit-only check for numeric IDs that may have spacing differences
+            v_digits = re.sub(r"\D", "", v)
+            if len(v_digits) >= 6 and v_digits in src_digits:
+                grounded.append(m)
+                continue
+            # Not found anywhere — discard
+            logger.debug("[GROUNDING] DROP %s %r — not in source text", m.pii_type, v[:40])
+            skipped += 1
+        if skipped:
+            logger.info("[GROUNDING] Discarded %d ungrounded entities", skipped)
+        all_matches = grounded
 
     if not all_matches:
         return []

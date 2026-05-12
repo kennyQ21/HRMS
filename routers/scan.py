@@ -166,6 +166,13 @@ def _run_pipeline(
         )
         working_text = content_doc.full_text or \
                        (parsed_data["data"][0].get("content", "") if parsed_data.get("data") else "")
+
+        # ── 3b. OCR normalisation ─────────────────────────────────────────────
+        # Clean Indic ZWJ/ZWNJ, Arabic diacritics, PUA chars, tab runs,
+        # and repeated punctuation before feeding text to detection engines.
+        from services.ocr_normalizer import clean_ocr
+        working_text = clean_ocr(working_text)
+
         sl.stage("RECONSTRUCT",
                  f"blocks={len(content_doc.blocks)}  chars={len(working_text)}")
 

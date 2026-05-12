@@ -128,24 +128,25 @@ class DetectionDispatcher:
         # ── Engine routing decision ───────────────────────────────────────────
         is_short = word_count < 20
 
-        # GLiNER — English semantic NER.
-        # Run ONLY when English content is present. It cannot read Indic,
-        # Arabic, CJK or other non-Latin scripts — running it on purely
-        # non-English text wastes ~30 seconds and finds nothing.
-        use_gliner = lang.is_english and not is_short
+        # GLiNER runs for ALL languages — its XLM-R backbone provides
+        # multilingual token classification without hallucination risk.
+        # Benchmark proved Qwen 0.5B generative extraction is unsuitable:
+        # 64% of its outputs were hallucinated (entities not in the document).
+        # GLiNER does span extraction — every result is grounded in the text.
+        use_gliner = not is_short
 
-        # Qwen LLM — multilingual semantic PII.
-        # Run when foreign/Indic script detected OR medical document.
-        # Requires Ollama to be running; skips gracefully if not.
-        use_llm = (lang.has_foreign or doc_type == "medical") and not is_short
+        # LLM disabled — generative extraction is architecturally unsafe for
+        # compliance PII systems. Hallucinations are indistinguishable from
+        # real entities, and the 0.5B model introduces training-data leakage
+        # (e.g. "Alibaba Cloud", "qwen@aliyun.com" injected into output).
+        use_llm = False
 
         logger.info(
             "[DISPATCHER] doc_type=%s words=%d | lang=%s "
-            "foreign=%s indic=%s | regex=✓ gliner=%s llm=%s",
+            "foreign=%s indic=%s | regex=✓ gliner=%s llm=✗",
             doc_type, word_count,
             lang.primary_lang, lang.has_foreign, lang.has_indic,
             "✓" if use_gliner else "✗",
-            "✓" if use_llm    else "✗",
         )
 
         # ── Regex (always synchronous) ────────────────────────────────────────
@@ -161,12 +162,6 @@ class DetectionDispatcher:
         if use_gliner:
             tasks.append(("gliner", _gliner_engine().run, {"text": working_text}))
 
-        if use_llm:
-            tasks.append(("llm", _llm_engine().run, {
-                "text": working_text,
-                "lang": lang,
-            }))
-
         # ── Execute ───────────────────────────────────────────────────────────
         if len(tasks) > 1:
             engine_results.extend(self._run_parallel(tasks))
@@ -175,8 +170,8 @@ class DetectionDispatcher:
             text_val = kwargs.pop("text")
             engine_results.append(fn(text_val, **kwargs))
 
-        # ── Entity Resolution ─────────────────────────────────────────────────
-        resolved = resolve(engine_results)
+        # ── Entity Resolution + Span Grounding ───────────────────────────────
+        resolved = resolve(engine_results, source_text=working_text)
         if allowed_pii:
             resolved = [e for e in resolved if e.pii_type in allowed_pii]
 
