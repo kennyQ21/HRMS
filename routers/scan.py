@@ -176,6 +176,14 @@ def _run_pipeline(
         resolved_raw   = dispatch_result.resolved
         engine_results = dispatch_result.engine_results
         lang           = dispatch_result.language
+        # Spans from detection engines are in NORMALISED coordinate space.
+        # The validator must receive the same normalised text so that
+        # text[span.start:span.end] resolves to the matched value.
+        norm_text = (
+            dispatch_result.normalised_text.normalised
+            if dispatch_result.normalised_text
+            else working_text
+        )
         ctx.record_engines(engine_results)
 
         lang_info = f"lang={lang.primary_lang} foreign={lang.has_foreign}" if lang else ""
@@ -219,7 +227,8 @@ def _run_pipeline(
                  f"{len(resolved)} entities → DB  scan_id={scan.id}")
 
         # ── 6. Validate ───────────────────────────────────────────────────────
-        validation = validate_results(text=working_text, resolved_entities=resolved)
+        # Pass normalised text — spans are in normalised coordinate space
+        validation = validate_results(text=norm_text, resolved_entities=resolved)
         sl.stage("VALIDATE",
                  f"passed={validation.passed}  issues={len(validation.issues)}")
 

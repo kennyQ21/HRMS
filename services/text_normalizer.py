@@ -1,30 +1,39 @@
 """
 services/text_normalizer.py
 -----------------------------
-Text Normalization Layer.
+Single-pass streaming text normalizer with persistent offset propagation.
 
-Core Rule (from architecture spec):
-  ORIGINAL text is ALWAYS preserved.
-  Normalization runs on a COPY; span offsets are mapped back to the original.
+Design principle
+────────────────
+Every transformation step runs character-by-character in ONE pass.
+Offset mappings are updated IMMEDIATELY as each output character is emitted.
+There is NO post-pass regex substitution after the alignment is built.
 
-Why this matters:
-  - Redaction requires exact character spans in the original document.
-  - Highlighting / audit trails require source fidelity.
-  - OCR output often contains noise that must be cleaned for detection
-    without mutating the stored document text.
+Two dense parallel arrays provide O(1) bidirectional span conversion:
 
-Responsibilities:
-  1. Produce a clean copy of the text for detection engines.
-  2. Build an alignment table (original_offset → normalised_offset).
-  3. Provide reverse mapping (normalised_span → original_span) so every
-     PIIMatch can reference the original document.
+  _norm_to_orig[norm_pos]  → orig_pos of the original char that produced it
+  _orig_to_norm[orig_pos]  → norm_pos where this original char first appears
+                             (-1 if the char was deleted / collapsed)
 
-Normalisation steps applied to the copy:
-  - Collapse excessive whitespace / line breaks
-  - Remove null bytes and control characters (except \\n and \\t)
-  - Normalise Unicode quotes, dashes, and ligatures to ASCII equivalents
-  - Expand common OCR ligatures (ﬁ→fi, ﬂ→fl, etc.)
-  - Preserve punctuation (needed for regex patterns like "PAN: ABCDE1234F")
+Why this matters
+────────────────
+The previous architecture applied re.sub() post-passes AFTER building the
+alignment table, then tried to rebuild it.  That strategy fails for:
+  - Indic / Arabic numerals (NFKC converts ৪ → 4 inline)
+  - NFKC expansions that emit 0, 1, or N chars per input char
+  - Whitespace runs collapsed by regex after the fact
+  - Combining marks, ligatures, RTL text
+
+With dense arrays populated during the single streaming pass none of those
+cases can cause offset drift.
+
+Transformations applied (in order, inline)
+──────────────────────────────────────────
+  1. Control/null bytes          → deleted   (no output, no mapping)
+  2. Unicode substitution table  → mapped    (smart quotes, dashes, ligatures)
+  3. Indic/Arabic numeral map    → 1:1       (Bengali ৪ → '4', Arabic ٤ → '4')
+  4. NFKC normalization          → N:M       (fullwidth, circled, composed chars)
+     └─ Inline whitespace dedup  → collapse  (3+ spaces → 2, 4+ newlines → 3)
 """
 
 from __future__ import annotations
@@ -34,127 +43,226 @@ import unicodedata
 from dataclasses import dataclass, field
 
 
+# ── Data container ─────────────────────────────────────────────────────────────
+
 @dataclass
 class NormalisedText:
     """
-    Container returned by normalise().  Holds both the cleaned text used
-    for detection and the alignment table for span mapping.
+    Holds the normalized string and exact bidirectional offset maps.
+
+    _norm_to_orig  — dense list; index = norm position, value = orig position
+    _orig_to_norm  — dense list; index = orig position, value = norm position
+                     (-1 means the original char was deleted/collapsed)
     """
-    original:  str
-    normalised: str
-    # List of (orig_offset, norm_offset) pairs — sorted by orig_offset.
-    # Gaps in original (deleted chars) are handled by linear interpolation.
-    _alignment: list[tuple[int, int]] = field(default_factory=list, repr=False)
+    original:      str
+    normalised:    str
+    _norm_to_orig: list[int] = field(default_factory=list, repr=False)
+    _orig_to_norm: list[int] = field(default_factory=list, repr=False)
+
+    # ── Span conversion ───────────────────────────────────────────────────────
 
     def to_original_span(self, norm_start: int, norm_end: int) -> tuple[int, int]:
         """
-        Map a span in the normalised text back to the original text.
-        Returns (-1, -1) if the mapping cannot be determined.
-        """
-        if not self._alignment:
-            return norm_start, norm_end  # identity (no normalisation applied)
+        Convert a [norm_start, norm_end) span to the equivalent original span.
 
-        orig_start = self._norm_to_orig(norm_start)
-        orig_end   = self._norm_to_orig(norm_end)
+        Returns (-1, -1) if the mapping cannot be resolved.
+        """
+        n = len(self._norm_to_orig)
+        if not n:
+            return norm_start, norm_end   # no normalization was applied
+
+        # Clamp to valid range
+        ns = max(0, min(norm_start, n - 1))
+        ne = max(0, min(norm_end - 1, n - 1))
+
+        orig_start = self._norm_to_orig[ns]
+        orig_last  = self._norm_to_orig[ne]
+
+        # orig_end is exclusive — advance past the original char at orig_last
+        orig_end = orig_last + 1
+
+        # If multiple normalized chars share the same orig position (expansion),
+        # the end is still orig_last + 1 which is correct.
         return orig_start, orig_end
 
-    def _norm_to_orig(self, norm_pos: int) -> int:
-        if norm_pos < 0:
-            return -1
-        # Binary search for the nearest alignment point
-        lo, hi = 0, len(self._alignment) - 1
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if self._alignment[mid][1] <= norm_pos:
-                lo = mid + 1
-            else:
-                hi = mid - 1
-        if lo == 0:
-            return self._alignment[0][0] if self._alignment else norm_pos
-        orig_base, norm_base = self._alignment[lo - 1]
-        delta = norm_pos - norm_base
-        return orig_base + delta
+    def to_norm_span(self, orig_start: int, orig_end: int) -> tuple[int, int]:
+        """
+        Convert an original [orig_start, orig_end) span to normalised space.
+        """
+        n = len(self._orig_to_norm)
+        if not n:
+            return orig_start, orig_end
+
+        def _first_norm(op: int) -> int:
+            for i in range(op, len(self._orig_to_norm)):
+                v = self._orig_to_norm[i]
+                if v >= 0:
+                    return v
+            return len(self._norm_to_orig)
+
+        def _last_norm(op: int) -> int:
+            for i in range(op - 1, -1, -1):
+                v = self._orig_to_norm[i]
+                if v >= 0:
+                    return v + 1
+            return 0
+
+        ns = _first_norm(orig_start)
+        ne = _last_norm(orig_end)
+        return ns, max(ns, ne)
 
 
-# ── Unicode normalisation maps ────────────────────────────────────────────────
+# ── Transformation tables (built at import time) ───────────────────────────────
 
-_UNICODE_SUBSTITUTIONS: dict[str, str] = {
-    # Smart quotes → ASCII quotes
-    "‘": "'", "’": "'", "“": '"', "”": '"',
+_SUBSTITUTIONS: dict[str, str] = {
+    # Smart quotes → ASCII
+    "‘": "'",  "’": "'",  "“": '"',  "”": '"',
     # Dashes → hyphen
-    "–": "-", "—": "-", "―": "-",
+    "–": "-",  "—": "-",  "―": "-",
     # Ellipsis
     "…": "...",
     # OCR ligatures
-    "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
+    "ﬁ": "fi",  "ﬂ": "fl",  "ﬃ": "ffi",  "ﬄ": "ffl",
     "ﬀ": "ff",
-    # Non-breaking space → space
-    " ": " ", " ": " ", " ": " ",
-    # Zero-width characters → empty
-    "​": "", "‌": "", "‍": "", "﻿": "",
-    # Degree / special that sometimes confuses tokenisers
-    "°": " degrees ",
+    # Non-breaking / hair / thin spaces → regular space
+    " ": " ",  " ": " ",  " ": " ",
+    # Zero-width chars → deleted
+    "​": "",  "‌": "",  "‍": "",  "﻿": "",
 }
 
-_LIGATURE_RE = re.compile("|".join(re.escape(k) for k in _UNICODE_SUBSTITUTIONS))
-_CONTROL_CHARS_RE = re.compile(r"[^\S\n\t ]+")   # all whitespace except \n, \t, space
-_NULL_BYTES_RE    = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_MULTI_BLANK_RE   = re.compile(r"[ \t]{3,}")       # 3+ spaces → 2
-_MULTI_NL_RE      = re.compile(r"\n{4,}")           # 4+ newlines → 3
+# Indic and Arabic digit codepoint ranges → ASCII digits
+def _build_indic_map() -> dict[str, str]:
+    m: dict[str, str] = {}
+    ranges = [
+        0x0966,  # Devanagari ०–९
+        0x09E6,  # Bengali ০–৯
+        0x0A66,  # Gurmukhi ੦–੯
+        0x0AE6,  # Gujarati ૦–૯
+        0x0B66,  # Odia ୦–୯
+        0x0BE6,  # Tamil ௦–௯
+        0x0C66,  # Telugu ౦–౯
+        0x0CE6,  # Kannada ೦–೯
+        0x0D66,  # Malayalam ൦–൯
+        0x0660,  # Arabic-Indic ٠–٩
+        0x06F0,  # Extended Arabic-Indic ۰–۹
+        0x07C0,  # NKo ߀–߉
+        0x0966,  # Already included (Devanagari)
+        0x1040,  # Myanmar ၀–၉
+        0x17E0,  # Khmer ០–៩
+        0x1810,  # Mongolian ᠀–᠙
+        0x1946,  # Limbu ᥆–᥏
+        0xFF10,  # Fullwidth ０–９
+    ]
+    for base in ranges:
+        for i in range(10):
+            ch = chr(base + i)
+            if ch not in m:
+                m[ch] = str(i)
+    return m
 
+_INDIC_DIGITS: dict[str, str] = _build_indic_map()
+
+# Control chars to delete (all C0 except \t=0x09, \n=0x0a, \r=0x0d)
+_CTRL = frozenset(
+    list(range(0x00, 0x09)) +
+    [0x0b, 0x0c] +
+    list(range(0x0e, 0x20)) +
+    [0x7f]
+)
+
+
+# ── Single-pass streaming normalizer ──────────────────────────────────────────
 
 def normalise(text: str) -> NormalisedText:
     """
-    Normalise *text* and return a NormalisedText container.
+    Normalize *text* in a single character-by-character pass.
 
-    The container holds both the original and the cleaned copy along with
-    an alignment table for bidirectional span mapping.
+    Returns a NormalisedText with exact norm↔orig offset arrays.
+    No post-pass regex substitutions are applied.
     """
     if not text:
-        return NormalisedText(original="", normalised="", _alignment=[])
+        return NormalisedText(
+            original="", normalised="",
+            _norm_to_orig=[], _orig_to_norm=[],
+        )
 
-    # Work on a character list to build alignment incrementally
-    chars_orig = list(text)
-    out_chars: list[str] = []
-    alignment: list[tuple[int, int]] = []   # (orig_idx, norm_idx)
+    out:          list[str] = []       # normalized chars
+    norm_to_orig: list[int] = []       # norm_pos → orig_pos
+    orig_to_norm: list[int] = [-1] * len(text)   # orig_pos → norm_pos
 
-    orig_i = 0
-    norm_i = 0
+    # Inline whitespace deduplication state
+    _SPACE_CHARS = {' ', '\t'}
+    consecutive_spaces  = 0   # current run of spaces/tabs in output
+    consecutive_newlines = 0  # current run of newlines in output
 
-    while orig_i < len(chars_orig):
-        ch = chars_orig[orig_i]
+    def _emit(orig_i: int, norm_ch: str) -> None:
+        """Record one output character and update both offset arrays."""
+        nonlocal consecutive_spaces, consecutive_newlines
+        norm_pos = len(out)
 
-        # 1. Null / control characters → skip
-        if _NULL_BYTES_RE.match(ch):
-            orig_i += 1
+        # Update orig→norm only on first emit for this orig_i
+        if orig_to_norm[orig_i] == -1:
+            orig_to_norm[orig_i] = norm_pos
+
+        out.append(norm_ch)
+        norm_to_orig.append(orig_i)
+
+        # Update inline whitespace state
+        if norm_ch in _SPACE_CHARS:
+            consecutive_spaces   += 1
+            consecutive_newlines  = 0
+        elif norm_ch == '\n':
+            consecutive_newlines += 1
+            consecutive_spaces    = 0
+        else:
+            consecutive_spaces   = 0
+            consecutive_newlines  = 0
+
+    for orig_i, ch in enumerate(text):
+
+        # ── 1. Delete control / null bytes ───────────────────────────────────
+        if ord(ch) in _CTRL:
+            # orig_to_norm[orig_i] stays -1 (deleted)
             continue
 
-        # 2. Unicode substitutions
-        sub = _UNICODE_SUBSTITUTIONS.get(ch)
+        # ── 2. Unicode substitution table ────────────────────────────────────
+        sub = _SUBSTITUTIONS.get(ch)
         if sub is not None:
-            alignment.append((orig_i, norm_i))
-            if sub:
-                out_chars.append(sub)
-                norm_i += len(sub)
-            orig_i += 1
+            for sc in sub:   # may be 0, 1, or multiple chars
+                if sc in _SPACE_CHARS:
+                    if consecutive_spaces < 2:
+                        _emit(orig_i, sc)
+                elif sc == '\n':
+                    if consecutive_newlines < 3:
+                        _emit(orig_i, sc)
+                else:
+                    _emit(orig_i, sc)
+            # If sub is empty (zero-width), orig_to_norm stays -1
             continue
 
-        # 3. NFKC normalise (e.g. fullwidth digits → ASCII)
+        # ── 3. Indic / Arabic digit normalization ─────────────────────────────
+        digit = _INDIC_DIGITS.get(ch)
+        if digit is not None:
+            _emit(orig_i, digit)
+            continue
+
+        # ── 4. NFKC normalization ─────────────────────────────────────────────
         nfkc = unicodedata.normalize("NFKC", ch)
-        alignment.append((orig_i, norm_i))
-        out_chars.append(nfkc)
-        norm_i += len(nfkc)
-        orig_i += 1
-
-    normalised = "".join(out_chars)
-
-    # Post-pass: collapse runs of spaces/newlines (alignment is already built
-    # at character granularity so the minor residual drift is acceptable)
-    normalised = _MULTI_BLANK_RE.sub("  ", normalised)
-    normalised = _MULTI_NL_RE.sub("\n\n\n", normalised)
+        # nfkc may be 0, 1, or N chars
+        for nc in nfkc:
+            if nc in _SPACE_CHARS:
+                if consecutive_spaces < 2:
+                    _emit(orig_i, nc)
+            elif nc == '\n':
+                if consecutive_newlines < 3:
+                    _emit(orig_i, nc)
+            else:
+                _emit(orig_i, nc)
+        # If nfkc is empty, orig_to_norm stays -1
 
     return NormalisedText(
         original=text,
-        normalised=normalised,
-        _alignment=alignment,
+        normalised="".join(out),
+        _norm_to_orig=norm_to_orig,
+        _orig_to_norm=orig_to_norm,
     )
