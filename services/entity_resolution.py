@@ -104,6 +104,11 @@ def resolve(engine_results: list[EngineResult]) -> list[ResolvedEntity]:
         # Step A+B: Span merge — collapse contained spans of the same type
         merged = _merge_spans(matches)
 
+        # Step A2: Phone subset suppression — drop local numbers that are
+        # digit-tails of a longer international number already in the list
+        if pii_type == "phone":
+            merged = _suppress_phone_subsets(merged)
+
         # Step C: Deduplicate by normalised value
         deduped = _deduplicate(merged, pii_type)
 
@@ -195,6 +200,29 @@ def _normalise_key(value: str, pii_type: str) -> str:
         return value.strip().lower()
     # Soft dedup: collapse whitespace, lowercase
     return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _suppress_phone_subsets(matches: list[PIIMatch]) -> list[PIIMatch]:
+    """
+    Suppress phone numbers that are digit-only subsets of a longer phone.
+
+    +91 98765 43210  → digits: 919876543210  (keep)
+       98765 43210   → digits:   9876543210  (suppress — tail of above)
+
+    Rule: if digits(A) ends with digits(B) and len(digits(A)) > len(digits(B)),
+    suppress B.
+    """
+    digit_vals = [(re.sub(r"\D", "", m.value), m) for m in matches]
+    kept: list[PIIMatch] = []
+    for i, (dv_i, m_i) in enumerate(digit_vals):
+        is_subset = any(
+            dv_j != dv_i and dv_j.endswith(dv_i) and len(dv_j) > len(dv_i)
+            for dv_j, _ in digit_vals
+            if dv_j != dv_i
+        )
+        if not is_subset:
+            kept.append(m_i)
+    return kept
 
 
 def _deduplicate(matches: list[PIIMatch], pii_type: str) -> list[list[PIIMatch]]:

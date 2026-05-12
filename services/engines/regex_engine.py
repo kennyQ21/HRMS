@@ -91,7 +91,13 @@ class RegexEngine(BaseEngine):
                         continue
                     raw = re.sub(r"\D", "", raw)
 
-                elif pii_id in {"phone", "aadhaar"}:
+                elif pii_id == "phone":
+                    raw = re.sub(r"\D", "", raw) or raw
+                    # Reject reversed OCR phone numbers (+ at end, e.g. "9876543210+91")
+                    if raw and not raw.startswith("91") and len(raw) < 10:
+                        continue
+
+                elif pii_id == "aadhaar":
                     raw = re.sub(r"\D", "", raw) or raw
 
                 elif pii_id in {"pan", "voter_id", "driving_license", "passport",
@@ -108,6 +114,14 @@ class RegexEngine(BaseEngine):
                     # These patterns use a capture group; prefer group(1) if present
                     if m.lastindex and m.lastindex >= 1 and m.group(1):
                         raw = m.group(1).strip()
+
+                elif pii_id == "email":
+                    # Strip whitespace injected by PDF tab-separated layout
+                    # e.g. "rajesh\n.\nsharma@gmail\n.\ncom" → "rajesh.sharma@gmail.com"
+                    raw = re.sub(r"[ \t\n\r]+", "", raw)
+                    # Reject if no @ remains after stripping
+                    if "@" not in raw:
+                        continue
 
                 elif pii_id == "upi":
                     # Avoid matching plain email addresses as UPI IDs

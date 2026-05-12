@@ -102,8 +102,10 @@ PII_TYPES: list[PIIType] = [
         "description": "US Social Security Number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.VERY_HIGH,
-        # OCR-tolerant: allows spaces/dots/dashes as separators
-        "regex":       r"\b(?!000|666|9\d{2})\d{3}[\s.\-]?(?!00)\d{2}[\s.\-]?(?!0000)\d{4}\b",
+        # Label-gated: bare 9-digit numbers without an SSN label are too
+        # ambiguous (e.g. Sri Lankan NIC "851234567V" is NOT a US SSN).
+        # Requires an explicit SSN/Social Security label on the same line.
+        "regex":       r"(?i)\b(?:ssn|social\s*security\s*(?:number|no|num|#)?|s\.s\.n\.?|taxpayer\s*id)\s*[:\-#]?\s*(?!000|666|9\d{2})\d{3}[\s.\-]?(?!00)\d{2}[\s.\-]?(?!0000)\d{4}\b",
     },
     {
         "id":          "abha_number",
@@ -428,7 +430,11 @@ PII_TYPES: list[PIIType] = [
         "description": "Personal or professional email address",
         "category":    Category.CONTACT,
         "sensitivity": Sensitivity.HIGH,
-        "regex":       r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+        # Tolerant of whitespace (space/tab/newline) within email fragments —
+        # tab-separated PDF layouts split emails across lines:
+        #   rajesh\n.\nsharma@gmail\n.\ncom → must still match.
+        # Value is cleaned (whitespace stripped) in regex_engine.py.
+        "regex":       r"[A-Za-z0-9._%+\-]+(?:[ \t\n]*\.[ \t\n]*[A-Za-z0-9._%+\-]+)*[ \t\n]*@[ \t\n]*[A-Za-z0-9\-]+(?:[ \t\n]*\.[ \t\n]*[A-Za-z0-9\-]+)*[ \t\n]*\.[ \t\n]*[A-Za-z]{2,}",
     },
     {
         "id":          "phone",
