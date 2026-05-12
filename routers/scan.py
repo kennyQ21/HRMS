@@ -69,53 +69,6 @@ def _is_pdf_protected(path: str) -> bool:
         return False
 
 
-# ── Post-OCR document classifier ─────────────────────────────────────────────
-
-import re as _re
-
-# Each entry: (doc_type, list_of_required_signal_patterns)
-# ALL patterns in the list must match for the doc_type to be assigned.
-# Patterns are case-insensitive strings searched in the OCR text.
-_DOC_SIGNALS: list[tuple[str, list[str]]] = [
-    ("aadhaar_card", [
-        r"(?:unique\s+identification\s+authority|uidai|आधार|aadhaar)",
-        r"(?:government\s+of\s+india|भारत\s+सरकार)",
-    ]),
-    ("pan_card", [
-        r"(?:income\s+tax\s+department|permanent\s+account\s+number)",
-        r"(?:govt\.?\s+of\s+india|government\s+of\s+india)",
-    ]),
-    ("voter_id", [
-        r"(?:election\s+commission|elector\s+photo\s+identity|epic)",
-    ]),
-    ("driving_license", [
-        r"(?:driving\s+licen[cs]e|motor\s+vehicles?\s+act|transport\s+department)",
-        r"(?:dl\s+no|licence\s+no|validity)",
-    ]),
-    ("passport", [
-        r"(?:republic\s+of|ministry\s+of\s+external\s+affairs|passport)",
-        r"(?:place\s+of\s+birth|date\s+of\s+issue|date\s+of\s+expiry)",
-    ]),
-]
-_DOC_SIGNAL_PATTERNS: list[tuple[str, list[_re.Pattern]]] = [
-    (dt, [_re.compile(p, _re.IGNORECASE) for p in patterns])
-    for dt, patterns in _DOC_SIGNALS
-]
-
-
-def _classify_from_ocr_text(text: str, current_type: str) -> str:
-    """
-    Refine document type from OCR-extracted text using multiple corroborating
-    layout signals. Returns current_type unchanged if no strong match found.
-
-    Requires ALL patterns in a rule to match — prevents single-entity
-    false positives (e.g. Aadhaar number in a bank statement).
-    """
-    for doc_type, patterns in _DOC_SIGNAL_PATTERNS:
-        if all(p.search(text) for p in patterns):
-            return doc_type
-    return current_type
-
 
 # ── Stage logger ──────────────────────────────────────────────────────────────
 
@@ -245,16 +198,6 @@ def _run_pipeline(
         sl.stage("POST-PROCESS",
                  f"{len(resolved_raw)} raw → {len(resolved)} kept")
 
-        # ── 5b. Post-OCR document type refinement ────────────────────────────
-        # For images and scanned PDFs the ingestion dispatcher cannot read
-        # content before OCR runs, so doc_type defaults to "generic".
-        # After OCR we have the full text — refine using STRONG textual
-        # signals that are unique to specific document layouts.
-        # NOTE: entity presence alone is NOT sufficient — an Aadhaar number
-        # in a bank statement does NOT make it an Aadhaar card.
-        if plan.doc_type in ("generic", "id") and working_text:
-            plan.doc_type = _classify_from_ocr_text(working_text, plan.doc_type)
-        sl.stage("CLASSIFY", f"doc_type={plan.doc_type}")
 
         # ── 5. Persist to DB ──────────────────────────────────────────────────
         counts = resolved_to_pii_counts(resolved)

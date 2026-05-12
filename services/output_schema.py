@@ -306,18 +306,13 @@ def build_scan_response(
     char_count  = len(content_doc.full_text) if content_doc else 0
     page_count  = content_doc.page_count if content_doc else 1
 
-    # ── document ──────────────────────────────────────────────────────────────
+    # ── document metadata (lightweight — file info only, no classification) ──
     document: dict[str, Any] = {
-        "type":       doc_type,
-        "confidence": _DOC_TYPE_CONFIDENCE.get(doc_type, 0.5),
         "filename":   filename,
         "scan_id":    scan_id,
         "parser":     parser_type,
         "page_count": page_count,
     }
-
-    # ── structured_fields ─────────────────────────────────────────────────────
-    structured_fields = _build_structured_fields(doc_type, resolved_entities)
 
     # ── entities — clean evidence layer ───────────────────────────────────────
     entities: list[dict] = []
@@ -354,13 +349,12 @@ def build_scan_response(
 
     # ── build response ────────────────────────────────────────────────────────
     result: dict[str, Any] = {
-        "status":           "success",
-        "document":         document,
-        "structured_fields": structured_fields,
-        "entities":         entities,
-        "ocr":              ocr,
-        "validation":       validation,
-        "redaction":        redaction,
+        "status":     "success",
+        "document":   document,
+        "entities":   entities,
+        "ocr":        ocr,
+        "validation": validation,
+        "redaction":  redaction,
     }
 
     # ── debug (opt-in) ────────────────────────────────────────────────────────
