@@ -167,7 +167,10 @@ class Validator:
             import re as _re
 
             def _norm(s: str) -> str:
-                return _re.sub(r"[\s\-_]", "", s).lower()
+                # Strip ALL whitespace (spaces, tabs, newlines) + hyphens/underscores.
+                # Indic PDFs with tab-separated layouts produce values like
+                # "ABCPS\n1234\nD" that must compare equal to "ABCPS1234D".
+                return _re.sub(r"[\s\t\n\r\-_]", "", s).lower()
 
             actual_norm = _norm(actual)
             value_norm  = _norm(e.value)
@@ -317,20 +320,28 @@ class Validator:
         for pii_type, pattern in _CRITICAL_CHECKS:
             for m in pattern.finditer(text):
                 val = m.group().strip().lower()
-                if val not in found_values:
-                    # Only flag if the entity type is completely absent
-                    existing_types = {e.pii_type for e in entities}
-                    if pii_type not in existing_types:
-                        issues.append(ValidationIssue(
-                            severity="warning",
-                            code="POSSIBLE_MISSED_ENTITY",
-                            message=f"Possible {pii_type} not in resolved entities: {m.group()!r}",
-                            pii_type=pii_type,
-                            value=m.group().strip(),
-                            span_start=m.start(),
-                            span_end=m.end(),
-                        ))
-                        missed += 1
+                # Check if this specific value is already detected (not just the type)
+                val_digits = re.sub(r"\D", "", val)
+                already_found = False
+                for e in entities:
+                    e_digits = re.sub(r"\D", "", e.value)
+                    if e.pii_type == pii_type and (
+                        val in e.value.lower() or e.value.lower() in val or
+                        (val_digits and e_digits and val_digits == e_digits)
+                    ):
+                        already_found = True
+                        break
+                if not already_found:
+                    issues.append(ValidationIssue(
+                        severity="warning",
+                        code="POSSIBLE_MISSED_ENTITY",
+                        message=f"Possible {pii_type} not in resolved entities: {m.group()!r}",
+                        pii_type=pii_type,
+                        value=m.group().strip(),
+                        span_start=m.start(),
+                        span_end=m.end(),
+                    ))
+                    missed += 1
 
         return missed
 

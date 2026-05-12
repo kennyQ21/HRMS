@@ -50,7 +50,9 @@ PII_TYPES: list[PIIType] = [
         "description": "12-digit Indian national biometric ID",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.VERY_HIGH,
-        "regex":       r"(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)",
+        # OCR-tolerant: allows spaces, dots, dashes, newlines between groups
+        # Also matches bare 12-digit sequences (no separator required)
+        "regex":       r"(?<!\d)(?:\d{4}[\s.\-]*\d{4}[\s.\-]*\d{4}|\d{12})(?!\d)",
     },
     {
         "id":          "pan",
@@ -58,7 +60,8 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian Permanent Account Number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.HIGH,
-        "regex":       r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
+        # Case-insensitive + OCR-tolerant: allows spaces/dots/dashes between groups
+        "regex":       r"(?i)\b[A-Z]{5}[\s.\-]*[0-9]{4}[\s.\-]*[A-Z]\b",
     },
     {
         "id":          "passport",
@@ -66,9 +69,10 @@ PII_TYPES: list[PIIType] = [
         "description": "International travel document number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.VERY_HIGH,
-        # Requires explicit label to avoid colliding with PAN/voter IDs.
+        # Label-gated with OCR-tolerant separators.
         # Covers: India (A1234567), US (123456789), UK (123456789), EU formats.
-        "regex":       r"(?i)\b(?:passport\s*(?:no|num(?:ber)?|#)?)\s*[:\-]?\s*([A-Z0-9]{6,9})\b",
+        # Allows spaces/dots/dashes between passport label and number.
+        "regex":       r"(?i)\b(?:passport\s*(?:no|num(?:ber)?|#)?)\s*[:\-.]?\s*([A-Z0-9][\s.\-]?[A-Z0-9]{5,8})\b",
     },
     {
         "id":          "voter_id",
@@ -76,7 +80,9 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian Electoral Photo Identity Card (EPIC)",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.HIGH,
-        "regex":       r"\b[A-Z]{3}[0-9]{7}\b",
+        # Case-SENSITIVE — voter ID alpha prefix is always uppercase on the card.
+        # OCR-tolerant separators retained.
+        "regex":       r"\b[A-Z]{3}[\s.\-]*[0-9]{7}\b",
     },
     {
         "id":          "driving_license",
@@ -84,7 +90,11 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian state-issued driving licence number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.HIGH,
-        "regex":       r"\b[A-Z]{2}[0-9]{2}[A-Z0-9]{1,15}\b",
+        # Case-SENSITIVE — DL state/country codes are printed in uppercase on
+        # physical documents and preserved by OCR.  Prose words like "to",
+        # "an", "in" are lowercase and will never match without (?i).
+        # Format: 2 UPPER alpha + 2 digits + 3–15 alphanumeric chars.
+        "regex":       r"\b[A-Z]{2}[\s.\-]*[0-9]{2}[\s.\-]*[A-Z0-9]{3,15}\b",
     },
     {
         "id":          "ssn",
@@ -92,7 +102,17 @@ PII_TYPES: list[PIIType] = [
         "description": "US Social Security Number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.VERY_HIGH,
-        "regex":       r"\b(?!000|666|9\d{2})\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+        # OCR-tolerant: allows spaces/dots/dashes as separators
+        "regex":       r"\b(?!000|666|9\d{2})\d{3}[\s.\-]?(?!00)\d{2}[\s.\-]?(?!0000)\d{4}\b",
+    },
+    {
+        "id":          "abha_number",
+        "name":        "Abha Number",
+        "description": "Ayushman Bharat Health Account number (14-digit)",
+        "category":    Category.GOVERNMENT_ID,
+        "sensitivity": Sensitivity.VERY_HIGH,
+        # ABHA is 14 digits, often formatted as XX-XXXX-XXXX-XXXX
+        "regex":       r"(?i)\b(?:abha\s*(?:no|num(?:ber)?|#|id)?)\s*[:\-]?\s*\d{2}[\s.\-]*\d{4}[\s.\-]*\d{4}[\s.\-]*\d{4}\b",
     },
 
     # ── Financial ────────────────────────────────────────────────────────────
@@ -110,7 +130,8 @@ PII_TYPES: list[PIIType] = [
         "description": "Bank account number",
         "category":    Category.FINANCIAL,
         "sensitivity": Sensitivity.VERY_HIGH,
-        "regex":       r"(?i)\b(?:account\s*(?:no|num(?:ber)?|#)\s*[:\-]?\s*)([0-9]{9,18})\b",
+        # Label-gated (primary) + context-gated near banking keywords (secondary)
+        "regex":       r"(?i)(?:\b(?:account\s*(?:no|num(?:ber)?|#)|a\/c|acct)\s*[:\-]?\s*([0-9]{9,18})\b)|(?:\b(?:bank|branch|ifsc|micr|cheque|passbook|statement)\s*[:\-]?\s*[\s\S]{0,30}?([0-9]{9,18})\b)",
     },
     {
         "id":          "upi",
@@ -128,7 +149,8 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian Financial System Code for bank branches",
         "category":    Category.FINANCIAL,
         "sensitivity": Sensitivity.MEDIUM,
-        "regex":       r"\b[A-Z]{4}0[A-Z0-9]{6}\b",
+        # Case-insensitive for OCR tolerance
+        "regex":       r"(?i)\b[A-Z]{4}0[A-Z0-9]{6}\b",
     },
     {
         "id":          "iban",
@@ -136,8 +158,14 @@ PII_TYPES: list[PIIType] = [
         "description": "International Bank Account Number (EU/global)",
         "category":    Category.FINANCIAL,
         "sensitivity": Sensitivity.VERY_HIGH,
-        # Matches IBAN: GB29 NWBK 6016 1331 9268 19, DE89370400440532013000, etc.
-        "regex":       r"\b[A-Z]{2}\d{2}[\s]?(?:[A-Z0-9]{4}[\s]?){1,7}[A-Z0-9]{1,4}\b",
+        # Anchored to valid ISO 3166-1 IBAN country codes to prevent false
+        # matches on short alphanumeric IDs like voter/DL numbers.
+        # Minimum real IBAN is 15 chars (Norway); maximum is 34.
+        "regex":       r"\b(?:AL|AD|AT|AZ|BH|BY|BE|BA|BR|BG|CR|HR|CY|CZ|DK|DO|"
+                       r"EG|SV|EE|FO|FI|FR|GE|DE|GI|GR|GL|GT|HU|IS|IQ|IE|IL|IT|"
+                       r"JO|KZ|XK|KW|LV|LB|LI|LT|LU|MT|MR|MU|MD|MC|ME|NL|MK|NO|"
+                       r"PK|PS|PL|PT|QA|RO|LC|SM|ST|SA|RS|SC|SK|SI|ES|SE|CH|TL|"
+                       r"TN|TR|UA|AE|GB|VA|VG|YE)\d{2}[\s]?(?:[A-Z0-9]{4}[\s]?){2,7}[A-Z0-9]{1,4}\b",
     },
     {
         "id":          "nhs_number",
@@ -162,6 +190,22 @@ PII_TYPES: list[PIIType] = [
         "category":    Category.FINANCIAL,
         "sensitivity": Sensitivity.CRITICAL,
         "regex":       r"(?i)\b(?:cvv|cvc|security\s*code)\s*[:\-]?\s*\d{3,4}\b",
+    },
+    {
+        "id":          "annual_income",
+        "name":        "Annual Income",
+        "description": "Yearly income or salary figure",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:annual\s*income|yearly\s*income|income|salary|ctc|gross\s*pay)\s*[:\-]?\s*[\u20B9$]?\s*[\d,]+(?:\.\d{1,2})?\s*(?:per\s*annum|p\.a\.|annually|/year|lakhs?|crores?|lpa)?\b",
+    },
+    {
+        "id":          "credit_score",
+        "name":        "Credit Score",
+        "description": "Credit bureau score (CIBIL, Equifax, etc.)",
+        "category":    Category.FINANCIAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:credit\s*score|cibil\s*score|cibil|equifax\s*score)\s*[:\-]?\s*\d{3,4}\b",
     },
 
     # ── Authentication ────────────────────────────────────────────────────────
@@ -199,7 +243,8 @@ PII_TYPES: list[PIIType] = [
         "sensitivity": Sensitivity.HIGH,
         # Universal DOB: label-gated to avoid false positives on bare dates.
         # Matches: DD/MM/YYYY, MM-DD-YYYY, YYYY.MM.DD, and label variants in any language context.
-        "regex":       r"(?i)\b(?:dob|date\s*of\s*birth|birth\s*(?:date|day)|born\s*(?:on)?|जन्म\s*तिथि|تاريخ الميلاد)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b",
+        # Added: D.O.B., जन्मदिन, जन्म दिनांक, पैदाइश, জন্ম তারিখ, பிறந்த தேதி
+        "regex":       r"(?i)\b(?:dob|d\.?o\.?b\.?|date\s*of\s*birth|birth\s*(?:date|day)|born\s*(?:on)?|जन्म\s*तिथि|जन्मदिन|जन्म\s*दिनांक|पैदाइश|বিবাহ\s*তারিখ|\u099c\u09a8\u09cd\u09ae\s*তারিখ|تاريخ الميلاد|பிறந்த\s*தேதி)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b",
     },
     {
         "id":          "address",
@@ -207,10 +252,10 @@ PII_TYPES: list[PIIType] = [
         "description": "Full or partial postal address",
         "category":    Category.PERSONAL,
         "sensitivity": Sensitivity.MEDIUM,
-        # Label-gated address: requires "Address:" prefix, captures up to 200
-        # chars but stops at double-newline or known non-address patterns.
-        # Avoids greedily consuming names and OCR garbage that follow the address.
-        "regex":       r"(?i)\b(?:address|addr|residence)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\s,./#\-]{8,150})(?=\n\n|\Z|(?:\n[A-Z][a-z]+\s*[:\-]))",
+        # Label-gated address: requires "Address:" prefix, captures up to 300
+        # chars but stops at triple-newline or known non-address patterns.
+        # Added Indic labels: पता, ঠিকানা/পতা, முகவரி, చిరునామా
+        "regex":       r"(?i)\b(?:address|addr|residence|पता|ঠিকানা|পতা|முகவரி|చిరునామా)\s*[:\-]?\s*([A-Za-z0-9\u0900-\u097F\u0980-\u09FF\u0B80-\u0BFF\u0C00-\u0C7F][A-Za-z0-9\s,./#\-\u0900-\u097F\u0980-\u09FF\u0B80-\u0BFF\u0C00-\u0C7F]{8,300})(?=\n\n\n|\Z|(?:\n[A-Z][a-z]+\s*[:\-]))",
     },
     {
         "id":          "gender",
@@ -220,7 +265,7 @@ PII_TYPES: list[PIIType] = [
         "sensitivity": Sensitivity.LOW,
         # Matches labelled ("Gender: Male") and standalone uppercase ("MALE")
         # as seen on Aadhaar, PAN, passports and driving licences.
-        "regex":       r"(?i)(?:\b(?:gender|sex|लिंग|جنس)\s*[:\-\/]?\s*)?(?<![A-Za-z])(MALE|FEMALE|Male|Female|TRANSGENDER|Non[\s\-]Binary|Other)(?![A-Za-z])",
+        "regex":       r"(?i)(?:\b(?:gender|sex|लिंग|جنس)\s*[:\-\/]?\s*)?(?<![A-Za-z])(MALE|FEMALE|Male|Female|TRANSGENDER|Non[\s\-]Binary|Other|पुरुष|महिला|પુરુષ|મહિલા|ਪੁਰਸ਼|ਔਰਤ)(?![A-Za-z])",
     },
     {
         "id":          "age",
@@ -228,7 +273,7 @@ PII_TYPES: list[PIIType] = [
         "description": "Person age",
         "category":    Category.DEMOGRAPHIC,
         "sensitivity": Sensitivity.LOW,
-        "regex":       r"(?i)\b(?:age)\s*[:\-]?\s*(\d{1,3})\s*(?:years?|yrs?)?\b",
+        "regex":       r"(?i)\b(?:age|उम्र|आयु|বয়স|வயது|వయస్సు)\s*[:\-]?\s*(\d{1,3})\s*(?:years?|yrs?|वर्ष|साल)?\b",
     },
     {
         "id":          "nationality",
@@ -391,13 +436,15 @@ PII_TYPES: list[PIIType] = [
         "description": "Mobile, landline, or international phone number in any country",
         "category":    Category.CONTACT,
         "sensitivity": Sensitivity.MEDIUM,
-        # Universal phone — two patterns to avoid false positives:
+        # Universal phone — three patterns for maximum recall:
         # 1. International format: must start with + and country code
         # 2. Label-gated local: requires phone/mobile/tel label
-        # This prevents 12-digit Aadhaar numbers being matched as phones.
+        # 3. Bare Indian mobile: 10-digit starting with 6-9 (most common format)
+        #    Aadhaar collision avoidance: 12-digit numbers are NOT matched here
         "regex":       r"(?:"
                        r"\+\d{1,3}[\s\-.]?(?:\(0?\d{1,4}\)[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
                        r"|(?i)(?:phone|mobile|tel|ph|mob|contact)\s*[:\-]?\s*(?:\+\d{1,3}[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
+                       r"|(?:\+91[\s\-.]?|0)?[6-9]\d{4}[\s\-.]?\d{5}(?!\d)"
                        r")(?!\d)",
     },
 
@@ -428,6 +475,52 @@ PII_TYPES: list[PIIType] = [
         "category":    Category.MEDICAL,
         "sensitivity": Sensitivity.HIGH,
         "regex":       "",   # detected by LLM and post-processor drug ontology
+    },
+
+    # ── Medical Measurements ──────────────────────────────────────────────────
+    {
+        "id":          "weight",
+        "name":        "Weight",
+        "description": "Body weight measurement",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:weight|wt|वजन|ভর|எடை)\s*[:\-]?\s*\d{1,3}(?:\.\d{1,2})?\s*(?:kg|kgs|kilograms?|lbs?|pounds?|g|gm|grams?)?\b",
+    },
+    {
+        "id":          "height",
+        "name":        "Height",
+        "description": "Body height measurement",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.LOW,
+        "regex":       r"(?i)\b(?:height|ht|ऊंचाई|उचाई|উচ্চতা|உயரம்)\s*[:\-]?\s*\d{1,3}(?:\.\d{1,2})?\s*(?:cm|cms|centimeters?|m|meters?|ft|feet|in|inches|')?\b",
+    },
+    {
+        "id":          "lab_test_results",
+        "name":        "Lab Test Results",
+        "description": "Medical laboratory test results and values",
+        "category":    Category.MEDICAL,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:lab\s*(?:result|report|test)|blood\s*(?:report|test|sugar|pressure)|urine\s*test|hemoglobin|cholesterol|glucose|creatinine|bp\s*[:\-])\b",
+    },
+
+    # ── Insurance Account ────────────────────────────────────────────────────
+    {
+        "id":          "insurance_account_number",
+        "name":        "Insurance Account Number",
+        "description": "Insurance account or member ID number",
+        "category":    Category.INSURANCE,
+        "sensitivity": Sensitivity.HIGH,
+        "regex":       r"(?i)\b(?:insurance\s*(?:account|acct|id|member)\s*(?:no|num(?:ber)?|#)?)\s*[:\-]?\s*([A-Z0-9\-]{5,20})\b",
+    },
+
+    # ── Contact ──────────────────────────────────────────────────────────────
+    {
+        "id":          "contact",
+        "name":        "Contact Information",
+        "description": "General contact information (phone, email, address combined)",
+        "category":    Category.CONTACT,
+        "sensitivity": Sensitivity.MEDIUM,
+        "regex":       r"(?i)\b(?:contact\s*(?:info|details?|number|no|person)?)\s*[:\-]?\s*([\S].{2,80})",
     },
 
     # ── Other ─────────────────────────────────────────────────────────────────
@@ -463,5 +556,7 @@ SEMANTIC_ONLY_PII: set[str] = {
 LLM_PRIORITY_PII: set[str] = {
     "diagnosis", "treatment_history", "allergies", "prescription",
     "immunization", "occupation", "educational_qualification",
-    "insurance_provider", "nationality",
+    "insurance_provider", "nationality", "weight", "height",
+    "lab_test_results", "abha_number", "annual_income", "credit_score",
+    "contact", "insurance_account_number", "medication",
 }

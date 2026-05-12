@@ -94,6 +94,13 @@ class RegexEngine(BaseEngine):
                 elif pii_id in {"phone", "aadhaar"}:
                     raw = re.sub(r"\D", "", raw) or raw
 
+                elif pii_id in {"pan", "voter_id", "driving_license", "passport",
+                                 "ifsc", "ssn", "nhs_number"}:
+                    # Strip internal whitespace/newlines from ID values.
+                    # OCR on tab-separated layouts produces "ABCPS\n1234\nD"
+                    # for a PAN card — normalise to "ABCPS1234D".
+                    raw = re.sub(r"[\s\t\n\r]+", "", raw)
+
                 elif pii_id in {"bank_account", "user_id", "password",
                                 "insurance_policy", "mrn", "employee_id",
                                 "allergies", "dob", "gender", "age",
