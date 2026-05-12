@@ -9,17 +9,28 @@ logger = logging.getLogger(__name__)
 # ── Engine ────────────────────────────────────────────────────────────────────
 _is_sqlite = Config.SQLALCHEMY_DATABASE_URI.startswith("sqlite")
 
-engine = create_engine(
-    Config.SQLALCHEMY_DATABASE_URI,
-    echo=Config.SQLALCHEMY_ECHO,
-    connect_args={"check_same_thread": False} if _is_sqlite else {},
-    # Pool limits — prevent connection storms under load.
-    # SQLite uses StaticPool so pool_size/max_overflow are ignored for it.
-    pool_size=5,
-    max_overflow=10,
-    pool_recycle=1800,   # recycle connections every 30 min (avoids stale TCP)
-    pool_pre_ping=True,  # validate connections before use
-)
+if _is_sqlite:
+    # SQLite is a single-writer file DB. Using a connection pool with
+    # pool_size > 1 causes "database is locked" when requests overlap
+    # (e.g. while GLiNER runs for 20s, a second request tries to INSERT).
+    # Fix: serialise all access through a single connection (StaticPool),
+    # and set a 30-second busy timeout so SQLite waits instead of failing.
+    from sqlalchemy.pool import StaticPool
+    engine = create_engine(
+        Config.SQLALCHEMY_DATABASE_URI,
+        echo=Config.SQLALCHEMY_ECHO,
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=StaticPool,
+    )
+else:
+    engine = create_engine(
+        Config.SQLALCHEMY_DATABASE_URI,
+        echo=Config.SQLALCHEMY_ECHO,
+        pool_size=5,
+        max_overflow=10,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+    )
 
 # ── Session factory ───────────────────────────────────────────────────────────
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
