@@ -121,22 +121,23 @@ class DetectionDispatcher:
         norm         = normalise(text)
         working_text = norm.normalised
         word_count   = len(working_text.split())
-        is_short     = word_count < 20
 
         # ── Language detection ────────────────────────────────────────────────
         lang = detect_language(working_text)
 
         # ── Engine routing decision ───────────────────────────────────────────
-        # Regex: always (fast, deterministic, language-independent)
-        # GLiNER: English text — best for English semantic NER
-        # Qwen LLM: non-English OR medical — handles multilingual + clinical
-        use_gliner = lang.is_english and not is_short
-        use_llm    = (lang.has_foreign or doc_type == "medical") and not is_short
+        is_short = word_count < 20
 
-        # Mixed language: run both GLiNER and LLM
-        if lang.has_foreign and lang.is_english:
-            use_gliner = True
-            use_llm    = True
+        # GLiNER — English semantic NER.
+        # Run ONLY when English content is present. It cannot read Indic,
+        # Arabic, CJK or other non-Latin scripts — running it on purely
+        # non-English text wastes ~30 seconds and finds nothing.
+        use_gliner = lang.is_english and not is_short
+
+        # Qwen LLM — multilingual semantic PII.
+        # Run when foreign/Indic script detected OR medical document.
+        # Requires Ollama to be running; skips gracefully if not.
+        use_llm = (lang.has_foreign or doc_type == "medical") and not is_short
 
         logger.info(
             "[DISPATCHER] doc_type=%s words=%d | lang=%s "
@@ -148,22 +149,11 @@ class DetectionDispatcher:
         )
 
         # ── Regex (always synchronous) ────────────────────────────────────────
+        # Pass use_nlp=True so regex knows GLiNER will handle semantic types
         engine_results: list[EngineResult] = []
         engine_results.append(
-            _regex_engine().run(working_text, use_nlp=use_gliner)
+            _regex_engine().run(working_text, use_nlp=True)
         )
-
-        if not use_gliner and not use_llm:
-            # Short or structured-only text: regex is enough
-            resolved = resolve(engine_results)
-            if allowed_pii:
-                resolved = [e for e in resolved if e.pii_type in allowed_pii]
-            return DispatchResult(
-                resolved=resolved,
-                engine_results=engine_results,
-                normalised_text=norm,
-                language=lang,
-            )
 
         # ── Build parallel tasks ──────────────────────────────────────────────
         tasks: list[tuple[str, object, dict]] = []

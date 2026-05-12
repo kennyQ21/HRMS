@@ -92,6 +92,48 @@ def _warm_ocr():
         logger.warning("── OCR warm-up failed (non-fatal): %s", exc)
 
 
+# ── Ollama auto-start ──────────────────────────────────────────────────────────
+
+def _ensure_ollama():
+    """
+    Start Ollama if not already running (background thread).
+    Required for multilingual + medical PII detection via Qwen 0.5B.
+    """
+    import subprocess, time, requests as _req, shutil
+    try:
+        r = _req.get("http://localhost:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            logger.info("── Ollama already running ✓ (Qwen 0.5B available)")
+            return
+    except Exception:
+        pass
+
+    if not shutil.which("ollama"):
+        logger.warning("── Ollama not found — multilingual PII detection disabled")
+        return
+
+    try:
+        logger.info("── Starting Ollama for multilingual detection …")
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Wait up to 10 s for Ollama to become ready
+        for _ in range(10):
+            time.sleep(1)
+            try:
+                r = _req.get("http://localhost:11434/api/tags", timeout=1)
+                if r.status_code == 200:
+                    logger.info("── Ollama started ✓  (qwen2.5:0.5b ready for multilingual PII)")
+                    return
+            except Exception:
+                continue
+        logger.warning("── Ollama did not respond in time — multilingual PII detection may be unavailable")
+    except Exception as exc:
+        logger.warning("── Could not start Ollama: %s", exc)
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -106,7 +148,8 @@ async def lifespan(app: FastAPI):
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("  Uploads dir ✓  (%s)", UPLOADS_DIR.resolve())
 
-    threading.Thread(target=_warm_ocr, daemon=True, name="ocr-warmup").start()
+    threading.Thread(target=_warm_ocr,      daemon=True, name="ocr-warmup").start()
+    threading.Thread(target=_ensure_ollama, daemon=True, name="ollama-start").start()
 
     logger.info("  Endpoint    →  POST /scan-file")
     logger.info("  Docs        →  http://localhost:8000/docs")

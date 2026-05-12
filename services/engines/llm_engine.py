@@ -56,6 +56,13 @@ _QWEN_ENTITY_TYPES: list[str] = [
     "treatment_history",
     "insurance_provider",
     "medication",
+    "abha_number",
+    "weight",
+    "height",
+    "annual_income",
+    "credit_score",
+    "contact",
+    "lab_test_results",
 ]
 
 # Constrained prompt — targeted list, strict JSON, no free-text extraction
@@ -98,6 +105,17 @@ def _call_ollama(prompt: str, timeout: int = _TIMEOUT_SEC) -> str:
     return resp.json().get("response", "")
 
 
+def _sanitize_json(raw: str) -> str:
+    # Fix invalid JSON escape sequences from small LLMs.
+    # json.loads rejects backslash-p, backslash-a, backslash-s etc.
+    # Valid escapes are: " \ / b f n r t and u followed by 4 hex digits.
+    valid_escapes = frozenset('"\\' + '/bfnrtu')
+    def _fix(m: re.Match) -> str:
+        ch = m.group(1)
+        return m.group(0) if ch in valid_escapes else ch
+    return re.sub(r'\\(.)', _fix, raw)
+
+
 def _parse_response(raw: str) -> list[dict]:
     """Robustly extract JSON array from LLM output."""
     raw = re.sub(r"```(?:json)?", "", raw).strip()
@@ -105,17 +123,21 @@ def _parse_response(raw: str) -> list[dict]:
     end   = raw.rfind("]")
     if start == -1 or end == -1:
         return []
+
+    json_str = _sanitize_json(raw[start:end+1])
+
     try:
-        result = json.loads(raw[start:end+1])
+        result = json.loads(json_str)
         return result if isinstance(result, list) else []
     except json.JSONDecodeError:
         pass
+
     # Recovery: parse individual objects
-    objects = re.findall(r"\{[^{}]+\}", raw, re.DOTALL)
+    objects = re.findall(r"\{[^{}]+\}", json_str, re.DOTALL)
     recovered = []
     for obj_str in objects:
         try:
-            obj = json.loads(obj_str)
+            obj = json.loads(_sanitize_json(obj_str))
             if isinstance(obj, dict) and "type" in obj and "value" in obj:
                 recovered.append(obj)
         except Exception:
@@ -244,7 +266,7 @@ class LLMEngine(BaseEngine):
                 if not pii_type:
                     continue
 
-                pos       = chunk.find(value)
+                pos       = _fuzzy_find(chunk, value)
                 abs_start = (pos + offset) if pos >= 0 else -1
                 abs_end   = (abs_start + len(value)) if abs_start >= 0 else -1
 
@@ -267,8 +289,8 @@ class LLMEngine(BaseEngine):
         return all_matches
 
 
-def _chunk_text(text: str, max_chars: int) -> list[str]:
-    """Split text into chunks of ≤max_chars, breaking at sentence boundaries."""
+def _chunk_text(text: str, max_chars: int, overlap: int = 150) -> list[str]:
+    """Split text into chunks of ≤max_chars with overlap, breaking at sentence boundaries."""
     if len(text) <= max_chars:
         return [text]
     chunks: list[str] = []
@@ -286,5 +308,49 @@ def _chunk_text(text: str, max_chars: int) -> list[str]:
         else:
             boundary += 1
         chunks.append(text[start:boundary])
-        start = boundary
+        step = max((boundary - start) - overlap, 1)
+        start = start + step
     return chunks
+
+
+def _fuzzy_find(text: str, value: str) -> int:
+    """
+    Lightweight fuzzy matching fallback for LLM span recovery.
+    Tries: exact → case-normalized → whitespace-normalized → punctuation-normalized.
+    Returns index or -1.
+    """
+    # Exact match
+    pos = text.find(value)
+    if pos >= 0:
+        return pos
+
+    import re as _re
+
+    # Case-normalized
+    text_lower = text.lower()
+    value_lower = value.lower()
+    pos = text_lower.find(value_lower)
+    if pos >= 0:
+        return pos
+
+    # Whitespace + punctuation normalized
+    def _norm(s: str) -> str:
+        # \p{P} (Unicode punctuation property) is not supported by Python's
+        # re module — use an explicit ASCII punctuation class instead.
+        return _re.sub(r'[\s!"#$%&\'()*+,\-./:;<=>?@\[\\\]^_`{|}~]+', " ", s).strip().lower()
+
+    norm_text = _norm(text)
+    norm_value = _norm(value)
+    pos = norm_text.find(norm_value)
+    if pos >= 0:
+        # Map back to original position (approximate)
+        # Count non-space chars up to pos in normalized text
+        char_count = 0
+        for i, ch in enumerate(text):
+            if not ch.isspace() and ch not in ".,;:!?()-":
+                char_count += 1
+                if char_count >= pos:
+                    return max(i - len(value) // 2, 0)
+        return 0
+
+    return -1
