@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from constants import PII_TYPE_MAP, SENSITIVITY_ORDER
-from services.engines.base_engine import EngineResult, PIIMatch
+from services.entities import PIIMatch
+from services.engines.base_engine import EngineResult
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 ENGINE_WEIGHTS: dict[str, float] = {
     "regex":  1.00,   # deterministic — highest trust
     "gliner": 0.85,   # GLiNER semantic NER — English
+    "qwen_ner": 0.78, # Qwen 0.5B — multilingual + medical
     "llm":    0.78,   # Qwen 0.5B — multilingual + medical
     # otter and presidio removed
 }
@@ -53,7 +55,7 @@ _TEXT_DEDUPE_TYPES: set[str] = {
 
 # For these semantic types, looser dedup (normalised whitespace only)
 _SOFT_DEDUPE_TYPES: set[str] = {
-    "name", "address", "organization", "city", "occupation",
+    "name", "father_name", "address", "organization", "city", "occupation",
     "diagnosis", "allergies", "treatment_history", "prescription",
     "educational_qualification", "insurance_provider", "nationality",
 }
@@ -110,8 +112,10 @@ def resolve(
     # Regex matches already have confirmed spans so we skip them (fast path).
     # Numeric IDs are compared digit-only to handle space/dash formatting.
     if source_text:
-        src_lower   = source_text.lower()
-        src_digits  = re.sub(r"\D", "", source_text)
+        src_lower        = source_text.lower()
+        src_digits       = re.sub(r"\D", "", source_text)
+        # Whitespace-normalized version for OCR-fragmented text matching
+        src_norm_ws      = re.sub(r"\s+", " ", source_text).lower()
         grounded: list[PIIMatch] = []
         skipped = 0
         for m in all_matches:
@@ -124,11 +128,25 @@ def resolve(
             if v_lower in src_lower:
                 grounded.append(m)
                 continue
+            # Whitespace-normalized check: "Bhanderi Ankit" matches "Bhanderi\nAnkit"
+            v_norm_ws = re.sub(r"\s+", " ", v_lower)
+            if v_norm_ws in src_norm_ws:
+                grounded.append(m)
+                continue
             # Digit-only check for numeric IDs that may have spacing differences
             v_digits = re.sub(r"\D", "", v)
             if len(v_digits) >= 6 and v_digits in src_digits:
                 grounded.append(m)
                 continue
+            # Token-presence check for multi-word names on OCR-fragmented ID cards.
+            # If ALL tokens of a name appear (in order) in the normalized source, accept it.
+            # This catches "Bhanderi Ankit Narsinhbhai" where each word is on its own line.
+            words = v_lower.split()
+            if len(words) >= 2:
+                pattern = r"\s+".join(re.escape(w) for w in words)
+                if re.search(pattern, src_lower):
+                    grounded.append(m)
+                    continue
             # Not found anywhere — discard
             logger.debug("[GROUNDING] DROP %s %r — not in source text", m.pii_type, v[:40])
             skipped += 1
@@ -173,6 +191,20 @@ def resolve(
                 key=lambda m: ENGINE_WEIGHTS.get(m.source, 0.5),
                 reverse=True,
             )[0]
+            _assert_semantic_span_integrity(best_match, source_text)
+
+            # Build audit metadata for compliance traceability
+            audit_metadata = {
+                "engine_count": len(sources),
+                "grounded": True,  # passed span grounding check above
+                "filters_applied": [],
+                "matched_by": sources,
+            }
+            # Record which engine provided the primary match
+            if best_match.source == "regex":
+                audit_metadata["matched_pattern"] = best_match.metadata.get("pattern", "regex")
+            elif best_match.source in ("gliner", "qwen_ner"):
+                audit_metadata["model_label"] = best_match.metadata.get("label", "")
 
             resolved.append(ResolvedEntity(
                 pii_type=pii_type,
@@ -183,7 +215,7 @@ def resolve(
                 end=best_match.end,
                 context=best_match.context,
                 sensitivity=sensitivity,
-                metadata={"engine_count": len(sources)},
+                metadata=audit_metadata,
             ))
 
     # Sort: sensitivity desc, then confidence desc
@@ -199,6 +231,30 @@ def resolve(
         len(all_matches), len(resolved),
     )
     return resolved
+
+
+def _assert_semantic_span_integrity(match: PIIMatch, source_text: str) -> None:
+    """Semantic engines must not emit spans that point at different text."""
+    if not source_text or match.source == "regex":
+        return
+    if match.start < 0 or match.end < 0:
+        return
+    if match.end > len(source_text) or match.start > match.end:
+        raise AssertionError(
+            f"semantic span outside normalized text for {match.pii_type}: "
+            f"{match.start}:{match.end}"
+        )
+    span_text = source_text[match.start:match.end]
+    span_norm = _span_norm(span_text)
+    value_norm = _span_norm(match.value)
+    assert value_norm in span_norm or span_norm in value_norm, (
+        f"semantic span/value mismatch for {match.pii_type}: "
+        f"{match.start}:{match.end}"
+    )
+
+
+def _span_norm(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text or "", flags=re.UNICODE).casefold()
 
 
 # ── A. Span Merging ───────────────────────────────────────────────────────────
@@ -297,6 +353,7 @@ def _canonicalize(group: list[PIIMatch], pii_type: str) -> str:
     Pick the most representative value from a group of matches.
     - Prefer the longest non-empty value (more complete).
     - For numeric types, strip non-digits.
+    - For name/father_name, clean OCR noise (strip embedded lines, ID keywords).
     """
     # Prefer regex matches (most precise)
     regex_hits = [m for m in group if m.source == "regex"]
@@ -312,33 +369,91 @@ def _canonicalize(group: list[PIIMatch], pii_type: str) -> str:
         if digits:
             return digits
 
+    # Clean OCR name artifacts: take only first line and strip trailing noise
+    if pii_type in {"name", "father_name"}:
+        value = _clean_ocr_name(value)
+
     return value
 
 
-# ── E. Confidence Fusion ──────────────────────────────────────────────────────
+# OCR keywords that appear in the middle/tail of misread names on Indian ID cards
+_ID_NOISE_TOKENS = re.compile(
+    r"(?i)\b(EPIC|VOTER|CARD|PAN|DOB|MALE|FEMALE|GOI|INDIA|ELECTION|"
+    r"COMMISSION|COMMISSIONER|\d{4,}|[A-Z]{3,}\d{4,})\b"
+)
+
+
+def _clean_ocr_name(value: str) -> str:
+    """
+    Remove OCR artifacts from a name value:
+    - Take only the first meaningful line (OCR concatenates adjacent card fields)
+    - Strip trailing noise tokens (EPIC, DOB, card labels)
+    - Collapse multiple spaces
+    """
+    if not value:
+        return value
+
+    # Take only the first line if there are embedded newlines
+    lines = [ln.strip() for ln in re.split(r"[\n\r]+", value) if ln.strip()]
+    if not lines:
+        return value
+
+    # Use the first line; if it's very short (< 3 chars) fall back to joining first 2
+    first_line = lines[0]
+    if len(first_line) < 3 and len(lines) > 1:
+        first_line = " ".join(lines[:2])
+
+    # Strip trailing noise tokens (OCR card field labels)
+    cleaned = _ID_NOISE_TOKENS.sub("", first_line).strip()
+
+    # Collapse multiple spaces
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    # Fall back to original if cleaning emptied the value
+    return cleaned if len(cleaned) >= 2 else first_line
+
+
+# ── E. Confidence Fusion (simplified) ─────────────────────────────────────────
+
+# Regex-primary types: regex confidence dominates completely
+_REGEX_PRIMARY_TYPES: set[str] = {
+    "aadhaar", "pan", "passport", "voter_id", "driving_license", "ssn",
+    "phone", "email", "ifsc", "bank_account", "upi", "credit_card",
+    "mrn", "abha_number", "ip_address", "pincode", "cvv", "expiry",
+    "blood_group", "insurance_policy", "insurance_account_number",
+    "employee_id", "user_id", "password", "nhs_number", "iban",
+}
+
 
 def _fuse_confidence(group: list[PIIMatch]) -> float:
     """
     Combine confidence scores from multiple engines.
 
-    Rule: weighted average of engine scores, capped at 1.0.
-    Multi-engine corroboration lifts score: each extra engine adds +0.05.
+    Simplified rules:
+      - Regex-primary types: regex confidence dominates completely
+      - Semantic types: max(engine_confidences) — simple and explainable
+      - Multi-engine corroboration: +0.05 per extra engine (capped at 1.0)
     """
     if not group:
         return 0.0
 
-    weighted_sum = sum(
-        m.confidence * ENGINE_WEIGHTS.get(m.source, 0.5)
-        for m in group
-    )
-    weight_total = sum(ENGINE_WEIGHTS.get(m.source, 0.5) for m in group)
-    base = weighted_sum / weight_total if weight_total > 0 else 0.0
+    # Determine if this is a regex-primary type
+    pii_type = group[0].pii_type if group else ""
 
-    # Corroboration bonus
+    if pii_type in _REGEX_PRIMARY_TYPES:
+        # Regex dominates completely for structured ID types
+        regex_matches = [m for m in group if m.source == "regex"]
+        if regex_matches:
+            return min(round(regex_matches[0].confidence, 4), 1.0)
+
+    # Semantic types: use max confidence across engines
+    max_conf = max(m.confidence for m in group)
+
+    # Multi-engine corroboration bonus
     unique_engines = {m.source for m in group}
     bonus = 0.05 * (len(unique_engines) - 1)
 
-    return min(round(base + bonus, 4), 1.0)
+    return min(round(max_conf + bonus, 4), 1.0)
 
 
 # ── Public helpers ────────────────────────────────────────────────────────────

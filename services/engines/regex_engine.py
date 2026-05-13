@@ -16,7 +16,8 @@ import re
 from typing import Optional
 
 from constants import PII_TYPES
-from .base_engine import BaseEngine, PIIMatch
+from services.entities import PIIMatch
+from .base_engine import BaseEngine
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,26 @@ _PATTERNS: dict[str, re.Pattern] = {
 
 # For these types regex is deliberately skipped when NLP is on — NER engines
 # have higher recall for free-form text
-_NLP_PREFERRED: set[str] = {"name", "address", "organization", "city", "nationality"}
+_NLP_PREFERRED: set[str] = {"name", "address", "organization", "diagnosis", "allergies", "treatment_history"}
+# Note: father_name has a regex handler, so NOT in NLP_PREFERRED
+
+# Label-anchored name patterns — deterministic so they bypass the NLP filter.
+# These fire when a name is explicitly preceded by a keyword label on an ID card.
+_LABEL_NAME_PATTERNS: list[re.Pattern] = [
+    # "Name: JOHN SMITH" / "Name - John Smith" (English, case-insensitive)
+    re.compile(r"(?i)(?:full\s+)?name\s*[:\-]\s*([A-Z][A-Za-z\s\.]{1,40})(?:\n|\r|$|\s{2,})", re.MULTILINE),
+    # Line before DOB on Aadhaar/PAN: all-caps 2-4 word line immediately above DOB line
+    re.compile(r"(?m)^([A-Z][A-Z\s\.]{4,50})\r?\n(?:[A-Z\s\.]{1,50}\r?\n)?(?:DOB|Date\s+of\s+Birth|Year\s+of\s+Birth)", re.MULTILINE),
+    # PAN card: name is the first ALL-CAPS 2-4 word line immediately after the DOB date
+    # e.g.  "16/11/1974\nMOHANBHAI DEVJIBHAI PATEL\n..."
+    re.compile(r"(?m)^(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})\r?\n([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\r?\n"),
+    # Name after "Elector's Name" or "Voter Name" label (Voter ID cards)
+    re.compile(r"(?i)(?:elector(?:'?s)?\s*name|voter\s*name)\s*[:\-]?\s*([A-Z][A-Za-z\s\.]{2,40})(?:\n|\r|$)", re.MULTILINE),
+    # All-caps name that immediately follows a relation line (S/O, D/O, Father's Name)
+    # e.g. "Father's Name:\nPATEL NARESH\nMOHANBHAI DEVJIBHAI PATEL ← cardholder"
+    # Pattern: relation label then the SECOND all-caps line (the cardholder)
+    re.compile(r"(?m)(?:(?:S\/O|D\/O|Father'?s?\s*(?:Name)?)[^\n]*\n)([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})(?=\s*\n)"),
+]
 
 
 def _luhn_valid(value: str) -> bool:
@@ -100,7 +120,36 @@ class RegexEngine(BaseEngine):
                 elif pii_id == "aadhaar":
                     raw = re.sub(r"\D", "", raw) or raw
 
-                elif pii_id in {"pan", "voter_id", "driving_license", "passport",
+                elif pii_id == "voter_id":
+                    # Voter ID regex has two alternation groups:
+                    # group(1) = EPIC-label-gated match, group(2) = bare 3-alpha+7-digit match
+                    # Strip all internal whitespace/noise from OCR
+                    g = None
+                    if m.lastindex:
+                        for gi in range(1, m.lastindex + 1):
+                            if m.group(gi):
+                                g = m.group(gi)
+                                break
+                    raw = re.sub(r"[\s.\-]+", "", g or raw).upper()
+
+                elif pii_id == "father_name":
+                    # father_name uses multiple capture groups; extract from the last non-None
+                    if m.lastindex:
+                        for gi in range(m.lastindex, 0, -1):
+                            if m.group(gi):
+                                raw = m.group(gi).strip().rstrip(".")
+                                break
+                    # Reject if too short or all-caps single-char noise
+                    words = raw.split()
+                    if len(words) == 1 and len(raw) <= 2:
+                        continue
+
+                elif pii_id == "dob":
+                    # dob uses capture group(1) for the actual date value
+                    if m.lastindex and m.lastindex >= 1 and m.group(1):
+                        raw = m.group(1).strip()
+
+                elif pii_id in {"pan", "driving_license", "passport",
                                  "ifsc", "ssn", "nhs_number"}:
                     # Strip internal whitespace/newlines from ID values.
                     # OCR on tab-separated layouts produces "ABCPS\n1234\nD"
@@ -109,7 +158,7 @@ class RegexEngine(BaseEngine):
 
                 elif pii_id in {"bank_account", "user_id", "password",
                                 "insurance_policy", "mrn", "employee_id",
-                                "allergies", "dob", "gender", "age",
+                                "allergies", "gender", "age",
                                 "marital_status", "pincode"}:
                     # These patterns use a capture group; prefer group(1) if present
                     if m.lastindex and m.lastindex >= 1 and m.group(1):
@@ -141,6 +190,58 @@ class RegexEngine(BaseEngine):
                     start=m.start(),
                     end=m.end(),
                     context=context,
+                ))
+
+        # ── Label-anchored name extraction (always runs, not NLP-filtered) ────
+        # Noise words that appear in ALL-CAPS on Indian ID cards but are NOT names
+        _ID_CARD_NOISE = {
+            "INDIA", "GOVERNMENT", "GOVT", "DEPARTMENT", "COMMISSION",
+            "AADHAAR", "INCOME", "TAX", "ELECTION", "VOTER", "AUTHORITY",
+            "IDENTIFICATION", "UNIQUE", "PERMANENT", "ACCOUNT", "NUMBER",
+        }
+        for pat in _LABEL_NAME_PATTERNS:
+            for m in pat.finditer(text):
+                # Extract name from last non-None capture group
+                # (DOB-anchored pattern has name in group(2), others in group(1))
+                value = None
+                if m.lastindex:
+                    for gi in range(m.lastindex, 0, -1):
+                        if m.group(gi) and not re.match(r"^\d", m.group(gi)):
+                            value = m.group(gi).strip().rstrip(".")
+                            break
+                if not value:
+                    value = m.group().strip().rstrip(".")
+                if not value or len(value) < 3:
+                    continue
+                # Skip obvious noise: single uppercase tokens that are labels/IDs
+                words = value.split()
+                if len(words) == 1 and (len(value) <= 2 or value.upper() in _ID_CARD_NOISE):
+                    continue
+                # Skip if all words are noise tokens
+                if all(w.upper() in _ID_CARD_NOISE for w in words):
+                    continue
+                # Must have at least one word of 3+ chars (not a 2-char noise abbrev)
+                if not any(len(w) >= 3 for w in words):
+                    continue
+                ctx_start = max(0, m.start() - 40)
+                ctx_end   = min(len(text), m.end() + 40)
+                # Use the group with the name value for span
+                name_group = None
+                if m.lastindex:
+                    for gi in range(m.lastindex, 0, -1):
+                        if m.group(gi) and not re.match(r"^\d", m.group(gi)):
+                            name_group = gi
+                            break
+                span_start = m.start(name_group) if name_group else m.start()
+                span_end   = m.end(name_group) if name_group else m.end()
+                matches.append(PIIMatch(
+                    pii_type="name",
+                    value=value,
+                    source="regex",
+                    confidence=0.92,
+                    start=span_start,
+                    end=span_end,
+                    context=text[ctx_start:ctx_end].strip(),
                 ))
 
         logger.debug("[REGEX] %d raw matches across %d patterns", len(matches), len(_PATTERNS))

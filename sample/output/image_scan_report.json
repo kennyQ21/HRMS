@@ -3,39 +3,90 @@
     "filename": "1560025797-1707.jpg",
     "status": "success",
     "ocr": {
-      "char_count": 283
+      "char_count": 303
     },
     "pii": [
+      {
+        "type": "AADHAAR",
+        "value": "487325192082",
+        "confidence": 1.0,
+        "start": 106,
+        "end": 120,
+        "source": "regex"
+      },
       {
         "type": "PAN",
         "value": "BVLPB1329N",
         "confidence": 1.0,
-        "start": 273,
-        "end": 283,
+        "start": 290,
+        "end": 300,
         "source": "regex"
       },
       {
-        "type": "ORG",
-        "value": "Bhanderi Ankit",
-        "confidence": 0.85,
-        "start": 50,
-        "end": 64,
-        "source": "presidio"
+        "type": "DOB",
+        "value": "17/11/1994",
+        "confidence": 1.0,
+        "start": 246,
+        "end": 256,
+        "source": "regex"
+      },
+      {
+        "type": "PERSON",
+        "value": "Ankit",
+        "confidence": 0.3447,
+        "start": 58,
+        "end": 63,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "BHANDERI",
+        "confidence": 0.3147,
+        "start": 198,
+        "end": 206,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "NARSINHBHAI",
+        "confidence": 0.3027,
+        "start": 215,
+        "end": 226,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "VIRJIBHAI",
+        "confidence": 0.293,
+        "start": 227,
+        "end": 236,
+        "source": "gliner"
+      },
+      {
+        "type": "GENDER",
+        "value": "Male",
+        "confidence": 1.0,
+        "start": 101,
+        "end": 105,
+        "source": "regex"
       }
     ],
     "summary": {
       "counts": {
+        "aadhaar": 1,
         "pan": 1,
-        "organization": 1
+        "dob": 1,
+        "name": 4,
+        "gender": 1
       },
-      "primary_type": "pan"
+      "primary_type": "aadhaar"
     }
   },
   {
     "filename": "1560051614-9920.jpg",
     "status": "success",
     "ocr": {
-      "char_count": 163
+      "char_count": 179
     },
     "pii": [
       {
@@ -47,133 +98,272 @@
         "source": "regex"
       },
       {
+        "type": "DOB",
+        "value": "16/11/1974",
+        "confidence": 1.0,
+        "start": 81,
+        "end": 91,
+        "source": "regex"
+      },
+      {
+        "type": "FATHER_NAME",
+        "value": "PATEL NARESH MOHANBHAI",
+        "confidence": 1.0,
+        "start": 81,
+        "end": 143,
+        "source": "regex"
+      },
+      {
         "type": "PERSON",
-        "value": "FaHTST GOVT.OFINDL",
-        "confidence": 0.85,
+        "value": "MOHANBHAI DEVJIBHAI PATEL",
+        "confidence": 0.92,
+        "start": 92,
+        "end": 117,
+        "source": "regex"
+      },
+      {
+        "type": "PERSON",
+        "value": "MOHANBHAI",
+        "confidence": 0.5677,
         "start": 131,
-        "end": 150,
-        "source": "presidio"
+        "end": 140,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "NARESH",
+        "confidence": 0.4203,
+        "start": 124,
+        "end": 130,
+        "source": "gliner"
       }
     ],
     "summary": {
       "counts": {
         "pan": 1,
-        "name": 1
+        "dob": 1,
+        "father_name": 1,
+        "name": 3
       },
-      "primary_type": "pan"
+      "primary_type": "name"
     }
   },
   {
     "filename": "1560052975-3951.jpg",
     "status": "success",
     "ocr": {
-      "char_count": 297
+      "char_count": 312
     },
     "pii": [
       {
+        "type": "FATHER_NAME",
+        "value": "Dineshbhai",
+        "confidence": 1.0,
+        "start": 264,
+        "end": 288,
+        "source": "regex"
+      },
+      {
         "type": "PERSON",
         "value": "Patel Rajendrakumar",
-        "confidence": 0.85,
-        "start": 190,
-        "end": 209,
-        "source": "presidio"
+        "confidence": 0.92,
+        "start": 184,
+        "end": 215,
+        "source": "regex"
       }
     ],
     "summary": {
       "counts": {
+        "father_name": 1,
         "name": 1
       },
-      "primary_type": "name"
+      "primary_type": "father_name"
     }
   },
   {
     "filename": "1560077954-1976.jpg",
     "status": "success",
     "ocr": {
-      "char_count": 193
+      "char_count": 148
     },
     "pii": [
       {
-        "type": "ORG",
-        "value": "IDENTITY CARD",
-        "confidence": 0.85,
-        "start": 49,
-        "end": 62,
-        "source": "presidio"
+        "type": "PERSON",
+        "value": "Asan",
+        "confidence": 0.4325,
+        "start": 82,
+        "end": 86,
+        "source": "gliner"
       },
       {
-        "type": "ORG",
-        "value": "ON MI AIame",
-        "confidence": 0.85,
-        "start": 155,
-        "end": 166,
-        "source": "presidio"
+        "type": "PERSON",
+        "value": "REh",
+        "confidence": 0.3522,
+        "start": 95,
+        "end": 98,
+        "source": "gliner"
       },
       {
-        "type": "VOTER_ID",
-        "value": "LDN2989101",
-        "confidence": 0.8,
-        "start": 63,
-        "end": 73,
-        "source": "presidio"
+        "type": "PERSON",
+        "value": "Heaenr",
+        "confidence": 0.3449,
+        "start": 75,
+        "end": 81,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "Vae Fopan",
+        "confidence": 0.3336,
+        "start": 44,
+        "end": 53,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "EceeNao",
+        "confidence": 0.3172,
+        "start": 109,
+        "end": 116,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "Bn",
+        "confidence": 0.3136,
+        "start": 25,
+        "end": 27,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "B1OlHIS",
+        "confidence": 0.2911,
+        "start": 67,
+        "end": 74,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "NaMMAas",
+        "confidence": 0.2885,
+        "start": 123,
+        "end": 130,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "Hloo2i3pt",
+        "confidence": 0.2552,
+        "start": 99,
+        "end": 108,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "SSS",
+        "confidence": 0.2511,
+        "start": 145,
+        "end": 148,
+        "source": "gliner"
       }
     ],
     "summary": {
       "counts": {
-        "organization": 2,
-        "voter_id": 1
+        "name": 10
       },
-      "primary_type": "voter_id"
+      "primary_type": "name"
     }
   },
   {
     "filename": "1560086364-3094.jpg",
     "status": "success",
     "ocr": {
-      "char_count": 399
+      "char_count": 425
     },
     "pii": [
-      {
-        "type": "DOB",
-        "value": "DOB:24/04/1994",
-        "confidence": 1.0,
-        "start": 272,
-        "end": 286,
-        "source": "regex"
-      },
       {
         "type": "AADHAAR",
         "value": "740157326476",
         "confidence": 1.0,
-        "start": 315,
-        "end": 327,
+        "start": 334,
+        "end": 348,
         "source": "regex"
       },
       {
-        "type": "PERSON",
-        "value": "Near Hanumanji",
-        "confidence": 0.85,
-        "start": 146,
-        "end": 160,
-        "source": "presidio"
+        "type": "DOB",
+        "value": "24/04/1994",
+        "confidence": 1.0,
+        "start": 269,
+        "end": 283,
+        "source": "regex"
       },
       {
-        "type": "ORG",
-        "value": "Aadhaar-Aam Admi",
-        "confidence": 0.85,
-        "start": 341,
-        "end": 357,
-        "source": "presidio"
+        "type": "ADDRESS",
+        "value": "Ravapar Road",
+        "confidence": 0.7141,
+        "start": 213,
+        "end": 225,
+        "source": "gliner"
+      },
+      {
+        "type": "ADDRESS",
+        "value": "Rajkot",
+        "confidence": 0.5596,
+        "start": 234,
+        "end": 240,
+        "source": "gliner"
+      },
+      {
+        "type": "ADDRESS",
+        "value": "Umiyanagar",
+        "confidence": 0.5125,
+        "start": 146,
+        "end": 156,
+        "source": "gliner"
+      },
+      {
+        "type": "ADDRESS",
+        "value": "Morvi",
+        "confidence": 0.4676,
+        "start": 227,
+        "end": 232,
+        "source": "gliner"
+      },
+      {
+        "type": "ADDRESS",
+        "value": "Gujarat",
+        "confidence": 0.4262,
+        "start": 284,
+        "end": 291,
+        "source": "gliner"
+      },
+      {
+        "type": "PERSON",
+        "value": "Pratik Ganeshbhai",
+        "confidence": 0.322,
+        "start": 179,
+        "end": 196,
+        "source": "gliner"
+      },
+      {
+        "type": "GENDER",
+        "value": "MALE",
+        "confidence": 1.0,
+        "start": 305,
+        "end": 309,
+        "source": "regex"
       }
     ],
     "summary": {
       "counts": {
-        "dob": 1,
         "aadhaar": 1,
+        "dob": 1,
+        "address": 5,
         "name": 1,
-        "organization": 1
+        "gender": 1
       },
-      "primary_type": "aadhaar"
+      "primary_type": "address"
     }
   }
 ]

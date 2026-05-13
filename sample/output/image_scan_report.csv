@@ -1,6 +1,6 @@
 filename,status,ocr_char_count,primary_pii_type,primary_pii_count,pii_counts_json,pii_samples_json,error
-1560025797-1707.jpg,success,283,pan,1,"{""organization"": 1, ""pan"": 1}","{""ORG"": [""Bh***""], ""PAN"": [""BVLPB****N""]}",
-1560051614-9920.jpg,success,163,pan,1,"{""name"": 1, ""pan"": 1}","{""PAN"": [""AQDPP****G""], ""PERSON"": [""Fa***""]}",
-1560052975-3951.jpg,success,297,name,1,"{""name"": 1}","{""PERSON"": [""Pa***""]}",
-1560077954-1976.jpg,success,193,voter_id,1,"{""organization"": 2, ""voter_id"": 1}","{""ORG"": [""ID***"", ""ON***""], ""VOTER_ID"": [""LDN****101""]}",
-1560086364-3094.jpg,success,399,aadhaar,1,"{""aadhaar"": 1, ""dob"": 1, ""name"": 1, ""organization"": 1}","{""AADHAAR"": [""7401 **** 6476""], ""DOB"": [""**/**/1994""], ""ORG"": [""Aa***""], ""PERSON"": [""Ne***""]}",
+1560025797-1707.jpg,success,303,aadhaar,1,"{""aadhaar"": 1, ""dob"": 1, ""gender"": 1, ""name"": 4, ""pan"": 1}","{""AADHAAR"": [""4873 **** 2082""], ""DOB"": [""**/**/1994""], ""GENDER"": [""Ma***""], ""PAN"": [""BVLPB****N""], ""PERSON"": [""An***"", ""BH***""]}",
+1560051614-9920.jpg,success,179,name,3,"{""dob"": 1, ""father_name"": 1, ""name"": 3, ""pan"": 1}","{""DOB"": [""**/**/1974""], ""FATHER_NAME"": [""PA***""], ""PAN"": [""AQDPP****G""], ""PERSON"": [""MO***"", ""NA***""]}",
+1560052975-3951.jpg,success,312,father_name,1,"{""father_name"": 1, ""name"": 1}","{""FATHER_NAME"": [""Di***""], ""PERSON"": [""Pa***""]}",
+1560077954-1976.jpg,success,148,name,10,"{""name"": 10}","{""PERSON"": [""As***"", ""RE***""]}",
+1560086364-3094.jpg,success,425,address,5,"{""aadhaar"": 1, ""address"": 5, ""dob"": 1, ""gender"": 1, ""name"": 1}","{""AADHAAR"": [""7401 **** 6476""], ""ADDRESS"": [""Ra***"", ""Um***""], ""DOB"": [""**/**/1994""], ""GENDER"": [""MA***""], ""PERSON"": [""Pr***""]}",

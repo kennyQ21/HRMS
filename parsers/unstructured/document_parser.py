@@ -278,6 +278,7 @@ class ImageParser(PDFParser):
         return {
             "data": [{"content": text}],
             "lines": lines,
+            "ocr_quality": data.get("ocr_quality"),
             "metadata": {
                 "columns": ["content"],
                 "rows": 1,

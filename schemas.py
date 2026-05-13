@@ -6,8 +6,8 @@ FastAPI uses these to:
   - auto-generate the /docs Swagger UI
 """
 
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
 
 
 # ── Shared DB-connection fields ───────────────────────────────────────────────
@@ -85,3 +85,57 @@ class APIResponse(BaseModel):
     status: str
     data: Optional[dict] = None
     message: Optional[str] = None
+
+
+class ScanJobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class SummaryModel(BaseModel):
+    total_entities: int = 0
+    unique_types: int = 0
+    risk_score: float = 0.0
+    risk_level: str = "LOW"
+
+
+class ProcessingMetricsModel(BaseModel):
+    total_ms: float = 0.0
+    ocr_ms: float = 0.0
+    detection_ms: float = 0.0
+    resolution_ms: float = 0.0
+
+
+class FileSummaryModel(BaseModel):
+    file_name: str
+    status: str
+    entities: int = 0
+    risk_level: str = "LOW"
+    distribution: Dict[str, int] = Field(default_factory=dict)
+    processing_metrics: ProcessingMetricsModel
+
+
+class DetailedResultModel(BaseModel):
+    file_name: str
+    entities: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ScanStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    progress: int
+    current_stage: str
+    total_files: int = 0
+    processed_files: int = 0
+    skipped_files: int = 0
+    failed_files: int = 0
+    current_file: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    elapsed_seconds: int = 0
+    summary: SummaryModel
+    distribution: Dict[str, int] = Field(default_factory=dict)
+    files: List[FileSummaryModel] = Field(default_factory=list)
+    detailed_results: List[DetailedResultModel] = Field(default_factory=list)
+    skipped: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)

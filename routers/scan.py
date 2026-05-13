@@ -20,12 +20,12 @@ from datetime import datetime
 from typing import Optional
 
 import PyPDF2
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 from config import UPLOADS_DIR
-from database import get_db
+from database import SessionLocal, get_db
 from models import ColumnScan, Scan, ScanAnomaly
 from parsers.structured.csv_parser import CSVParser
 from parsers.structured.excel_parser import ExcelParser
@@ -37,14 +37,57 @@ from services.detection_dispatcher import dispatch_detection
 from services.entity_resolution import resolved_to_pii_counts, select_primary_from_resolved
 from services.ingestion_dispatcher import dispatch_ingestion
 from services.output_schema import build_error_response, build_scan_response
+from services.pii_analytics import calculate_distribution, calculate_risk_score, risk_level_from_score, summarize_entities
 from services.pipeline_manager import get_pipeline
 from services.post_processor import post_process
+from services.job_store import complete_job, create_job, fail_job, get_job, update_job
 from services.validator import validate_results
+from schemas import ScanJobResponse, ScanStatusResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["PII Scan"])
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+HIDDEN_ZIP_NAMES = {".DS_Store"}
+STAGE_PROGRESS = {
+    "INITIALIZING": 2,
+    "PARSING": 10,
+    "OCR_PROCESSING": 35,
+    "DETECTING_PII": 65,
+    "ENTITY_RESOLUTION": 85,
+    "PERSISTING_RESULTS": 95,
+}
+
+
+def _is_hidden_or_system_file(name: str) -> bool:
+    base = os.path.basename(name)
+    return (
+        base in HIDDEN_ZIP_NAMES
+        or base.startswith("._")
+        or base.startswith(".")
+        or "__MACOSX" in name
+    )
+
+
+def _build_processing_metrics_breakdown(result: dict, fallback_total_ms: int) -> dict:
+    metrics = result.get("processing_metrics", {}) if isinstance(result, dict) else {}
+    total_ms = float(metrics.get("total_ms", fallback_total_ms))
+    return {
+        "total_ms": total_ms,
+        "ocr_ms": float(metrics.get("ocr_ms", 0.0)),
+        "detection_ms": float(metrics.get("detection_ms", 0.0)),
+        "resolution_ms": float(metrics.get("resolution_ms", 0.0)),
+    }
+
+
+def _normalized_distribution_from_entities(entities: list[dict]) -> dict[str, int]:
+    distribution: dict[str, int] = {}
+    for entity in entities:
+        pii_type = str(entity.get("type", "UNKNOWN")).upper()
+        if pii_type == "ORGANIZATION":
+            continue
+        distribution[pii_type] = distribution.get(pii_type, 0) + 1
+    return distribution
 
 
 # ── Parser factory ────────────────────────────────────────────────────────────
@@ -115,6 +158,7 @@ def _run_pipeline(
     db: Session,
     scan: Scan,
     password: Optional[str],
+    job_id: Optional[str] = None,
 ) -> dict:
     t0  = time.perf_counter()
     sl  = StageLogger(filename, scan.id)
@@ -126,9 +170,19 @@ def _run_pipeline(
 
         # ── 1. Ingestion plan ─────────────────────────────────────────────────
         plan = dispatch_ingestion(temp_path, filename, password)
+        if job_id:
+            update_job(
+                job_id,
+                status="RUNNING",
+                current_stage="PARSING",
+                progress=STAGE_PROGRESS["PARSING"],
+                current_file=filename,
+            )
         sl.stage("ROUTE",
-                 f"doc_type={plan.doc_type}  parser={plan.parser_type}  "
-                 f"ocr={'yes' if plan.needs_ocr else 'no'}")
+                 f"profile=structured={plan.document_profile.is_structured} "
+                 f"medical={plan.document_profile.is_medical} "
+                 f"ocr={plan.document_profile.needs_ocr}  "
+                 f"parser={plan.parser_type}")
 
         if plan.parser_type == "unknown":
             sl.error("Unsupported file format")
@@ -141,13 +195,22 @@ def _run_pipeline(
             return build_error_response(filename, "No parser available for this format")
 
         is_image = filename.lower().endswith(IMAGE_EXTENSIONS)
+        if job_id and (is_image or plan.document_profile.needs_ocr):
+            update_job(
+                job_id,
+                current_stage="OCR_PROCESSING",
+                progress=STAGE_PROGRESS["OCR_PROCESSING"],
+            )
+        t_ocr = time.perf_counter()
         if is_image:
             parsed_data = parser.parse_with_boxes(temp_path)
             ocr_output  = [{"text": parsed_data["data"][0].get("content", ""),
-                             "lines": parsed_data.get("lines", [])}]
+                             "lines": parsed_data.get("lines", []),
+                             "ocr_quality": parsed_data.get("ocr_quality")}]
         else:
             parsed_data = parser.parse(temp_path)
             ocr_output  = None
+        ocr_ms = (time.perf_counter() - t_ocr) * 1000
 
         if not parser.validate(parsed_data):
             sl.error("Invalid file structure")
@@ -155,7 +218,7 @@ def _run_pipeline(
 
         sl.stage("PARSE",
                  f"chars={len(parsed_data['data'][0].get('content',''))}  "
-                 f"ocr={'yes' if (is_image or plan.needs_ocr) else 'no'}")
+                 f"ocr={'yes' if (is_image or plan.document_profile.needs_ocr) else 'no'}")
 
         # ── 3. Content reconstruction ─────────────────────────────────────────
         content_doc  = reconstruct_content(
@@ -177,13 +240,24 @@ def _run_pipeline(
                  f"blocks={len(content_doc.blocks)}  chars={len(working_text)}")
 
         # ── 4. Detection ──────────────────────────────────────────────────────
+        t_detect = time.perf_counter()
         dispatch_result = dispatch_detection(
             text=working_text,
             doc_type=plan.doc_type,
         )
+        detection_total_ms = (time.perf_counter() - t_detect) * 1000
+        if job_id:
+            update_job(
+                job_id,
+                current_stage="DETECTING_PII",
+                progress=STAGE_PROGRESS["DETECTING_PII"],
+            )
         resolved_raw   = dispatch_result.resolved
         engine_results = dispatch_result.engine_results
         lang           = dispatch_result.language
+        engine_ms      = sum(getattr(er, "duration_ms", 0.0) for er in engine_results)
+        detection_ms   = engine_ms
+        resolution_ms  = max(detection_total_ms - engine_ms, 0.0)
         # Spans from detection engines are in NORMALISED coordinate space.
         # The validator must receive the same normalised text so that
         # text[span.start:span.end] resolves to the matched value.
@@ -200,8 +274,43 @@ def _run_pipeline(
         )
         sl.stage("DETECT", f"{lang_info}  {engine_summary}".strip())
 
+        # ── 5. Map semantic entities to OCR bounding boxes (for images) ────────
+        if is_image and ocr_output:
+            from services.bbox_mapper import map_entities_to_bboxes
+            ocr_lines = []
+            for ocr_page in (ocr_output or []):
+                ocr_lines.extend(ocr_page.get("lines", []))
+            resolved_raw = map_entities_to_bboxes(
+                resolved_raw, ocr_lines, norm_text
+            )
+
+            from services.ocr_validator import validate_ocr_alignment
+            ocr_report = validate_ocr_alignment(
+                resolved_raw,
+                ocr_lines,
+                parsed_data.get("ocr_quality"),
+            )
+            if not ocr_report.passed or ocr_report.manual_review_required:
+                logger.warning("[OCR-VALIDATOR] issues=%s", ocr_report.issues)
+
         # ── 5a. Post-processing — precision filter ────────────────────────────
         resolved = post_process(resolved_raw)
+        if job_id:
+            update_job(
+                job_id,
+                current_stage="ENTITY_RESOLUTION",
+                progress=STAGE_PROGRESS["ENTITY_RESOLUTION"],
+            )
+
+        # ── 5a-guard. Entity count protection ─────────────────────────────────
+        if len(resolved) > MAX_ENTITY_COUNT:
+            logger.warning(
+                "[GUARDRAIL] %d entities exceeds cap %d — truncating to top %d by confidence",
+                len(resolved), MAX_ENTITY_COUNT, MAX_ENTITY_COUNT,
+            )
+            resolved.sort(key=lambda e: e.confidence, reverse=True)
+            resolved = resolved[:MAX_ENTITY_COUNT]
+
         sl.stage("POST-PROCESS",
                  f"{len(resolved_raw)} raw → {len(resolved)} kept")
 
@@ -209,6 +318,17 @@ def _run_pipeline(
         # ── 5. Persist to DB ──────────────────────────────────────────────────
         counts = resolved_to_pii_counts(resolved)
         primary_type, primary_count, _ = select_primary_from_resolved(resolved)
+        if job_id:
+            distribution = calculate_distribution(resolved)
+            summary = summarize_entities(resolved)
+            update_job(
+                job_id,
+                current_stage="PERSISTING_RESULTS",
+                progress=STAGE_PROGRESS["PERSISTING_RESULTS"],
+                total_entities=summary["total_entities"],
+                distribution=distribution,
+                summary=summary,
+            )
 
         col_scan = ColumnScan(
             db_name=filename,
@@ -254,7 +374,16 @@ def _run_pipeline(
             validation_report=validation,
             elapsed_ms=elapsed_ms,
             language=lang_code,
+            ocr_ms=ocr_ms,
+            detection_ms=detection_ms,
+            resolution_ms=resolution_ms,
         )
+        timeout_warnings = [
+            f"{e.engine}_timeout" for e in engine_results
+            if getattr(e, "error", None) == "timeout"
+        ]
+        if timeout_warnings:
+            result["warnings"] = timeout_warnings
         sl.footer(len(resolved))
         return result
 
@@ -335,97 +464,260 @@ def _scan_blocking(
         db.close()
 
 
+def _run_scan_job(job_id: str, temp_path: str, original_filename: str, password: Optional[str]) -> None:
+    db = SessionLocal()
+    try:
+        scan = Scan(
+            name=f"Scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            connector_id="file_upload",
+            realm_name=None,
+        )
+        db.add(scan)
+        db.flush()
+
+        fname_lower = original_filename.lower()
+        update_job(job_id, status="RUNNING", current_stage="INITIALIZING", progress=STAGE_PROGRESS["INITIALIZING"])
+
+        if fname_lower.endswith(".zip"):
+            extract_dir = tempfile.mkdtemp(prefix="zip_")
+            try:
+                with zipfile.ZipFile(temp_path, "r") as zf:
+                    encrypted = any(zi.flag_bits & 0x1 for zi in zf.filelist)
+                    if encrypted and not password:
+                        raise ValueError("ZIP is password-protected — supply a password.")
+                    zf.extractall(
+                        extract_dir,
+                        pwd=password.encode() if encrypted and password else None,
+                    )
+
+                members: list[tuple[str, str]] = []
+                skipped_members: list[str] = []
+                for root, _, files in os.walk(extract_dir):
+                    for file_name in files:
+                        rel_path = os.path.relpath(os.path.join(root, file_name), extract_dir)
+                        if _is_hidden_or_system_file(rel_path):
+                            skipped_members.append(file_name)
+                            continue
+                        members.append((os.path.join(root, file_name), file_name))
+
+                update_job(
+                    job_id,
+                    total_files=len(members),
+                    processed_files=0,
+                    failed_files=0,
+                    skipped_files=len(skipped_members),
+                    skipped=skipped_members,
+                )
+
+                aggregate_distribution: dict[str, int] = {}
+                file_summaries = []
+                detailed_results = []
+
+                for index, (member_path, member_name) in enumerate(members):
+                    update_job(job_id, current_file=member_name)
+                    file_t0 = time.perf_counter()
+                    try:
+                        result = _run_pipeline(member_path, member_name, db, scan, password, job_id=job_id)
+                        entities = result.get("entities", [])
+                        normalized_entities = []
+                        for entity in entities:
+                            cloned = dict(entity)
+                            cloned["type"] = str(cloned.get("type", "UNKNOWN")).upper()
+                            normalized_entities.append(cloned)
+
+                        distribution = _normalized_distribution_from_entities(normalized_entities)
+                        for pii_type, count in distribution.items():
+                            aggregate_distribution[pii_type] = aggregate_distribution.get(pii_type, 0) + count
+
+                        processing_metrics = _build_processing_metrics_breakdown(
+                            result, int((time.perf_counter() - file_t0) * 1000)
+                        )
+
+                        file_summaries.append({
+                            "file_name": member_name,
+                            "status": "COMPLETED",
+                            "entities": sum(distribution.values()),
+                            "distribution": distribution,
+                            "risk_level": risk_level_from_score(calculate_risk_score(distribution), distribution),
+                            "processing_metrics": processing_metrics,
+                        })
+                        detailed_results.append({
+                            "file_name": member_name,
+                            "entities": normalized_entities,
+                        })
+                        processed = index + 1
+                        progress = int((processed / max(len(members), 1)) * 100)
+                        summary_score = calculate_risk_score(aggregate_distribution)
+                        update_job(
+                            job_id,
+                            processed_files=processed,
+                            progress=min(progress, 99),
+                            distribution=aggregate_distribution,
+                            total_entities=sum(aggregate_distribution.values()),
+                            files=file_summaries,
+                            detailed_results=detailed_results,
+                            summary={
+                                "total_entities": sum(aggregate_distribution.values()),
+                                "unique_types": len(aggregate_distribution),
+                                "risk_score": summary_score,
+                                "risk_level": risk_level_from_score(summary_score, aggregate_distribution),
+                            },
+                        )
+                    except Exception as exc:
+                        logger.error("ZIP member %s failed: %s", member_name, exc)
+                        snapshot = get_job(job_id) or {}
+                        failed_files = int(snapshot.get("failed_files", 0)) + 1
+                        processed = int(snapshot.get("processed_files", 0)) + 1
+                        errors = list(snapshot.get("errors", []))
+                        errors.append(f"{member_name}: {exc}")
+                        file_summaries.append({
+                            "file_name": member_name,
+                            "status": "FAILED",
+                            "entities": 0,
+                            "distribution": {},
+                            "risk_level": "LOW",
+                            "processing_metrics": {
+                                "total_ms": float(int((time.perf_counter() - file_t0) * 1000)),
+                                "ocr_ms": 0.0,
+                                "detection_ms": 0.0,
+                                "resolution_ms": 0.0,
+                            },
+                        })
+                        update_job(
+                            job_id,
+                            failed_files=failed_files,
+                            processed_files=processed,
+                            files=file_summaries,
+                            errors=errors,
+                        )
+
+                db.commit()
+                summary_score = calculate_risk_score(aggregate_distribution)
+                update_job(
+                    job_id,
+                    summary={
+                        "total_entities": sum(aggregate_distribution.values()),
+                        "unique_types": len(aggregate_distribution),
+                        "risk_score": summary_score,
+                        "risk_level": risk_level_from_score(summary_score, aggregate_distribution),
+                    },
+                    distribution=aggregate_distribution,
+                    files=file_summaries,
+                    detailed_results=detailed_results,
+                )
+                complete_job(job_id)
+            finally:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+            return
+
+        if fname_lower.endswith(".pdf") and _is_pdf_protected(temp_path) and not password:
+            raise ValueError("PDF is password-protected — supply a password.")
+
+        t0 = time.perf_counter()
+        result = _run_pipeline(temp_path, original_filename, db, scan, password, job_id=job_id)
+        db.commit()
+        result["file_count"] = 1
+        entities = result.get("entities", [])
+        normalized_entities = []
+        for entity in entities:
+            cloned = dict(entity)
+            cloned["type"] = str(cloned.get("type", "UNKNOWN")).upper()
+            normalized_entities.append(cloned)
+        result["entities"] = normalized_entities
+        distribution = _normalized_distribution_from_entities(normalized_entities)
+        score = calculate_risk_score(distribution)
+        file_summary = {
+            "file_name": original_filename,
+            "status": "COMPLETED",
+            "entities": sum(distribution.values()),
+            "distribution": distribution,
+            "risk_level": risk_level_from_score(score, distribution),
+            "processing_metrics": _build_processing_metrics_breakdown(
+                result, int((time.perf_counter() - t0) * 1000)
+            ),
+        }
+        result["summary"] = {
+            "total_entities": sum(distribution.values()),
+            "unique_types": len(distribution),
+            "risk_score": score,
+            "risk_level": risk_level_from_score(score, distribution),
+        }
+        result["distribution"] = distribution
+        result["files"] = [file_summary]
+        update_job(
+            job_id,
+            total_files=1,
+            processed_files=1,
+            skipped_files=0,
+            failed_files=0,
+            total_entities=result["summary"]["total_entities"],
+            distribution=distribution,
+            files=[file_summary],
+            summary=result["summary"],
+            detailed_results=[{"file_name": original_filename, "entities": normalized_entities}],
+            skipped=[],
+        )
+        complete_job(job_id)
+    except Exception as exc:
+        db.rollback()
+        logger.exception("scan job unhandled error")
+        fail_job(job_id, str(exc))
+    finally:
+        db.close()
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
 # ── GET /status ───────────────────────────────────────────────────────────────
 
 @router.get("/status", summary="Service health and engine status")
 async def status():
-    """
-    Returns the health of the service and the availability of every engine.
-
-    Response fields:
-    - **service**: always `"ok"` if the API is reachable
-    - **engines.regex**: always ready (no model load needed)
-    - **engines.gliner**: whether the GLiNER model is loaded in memory
-    - **engines.ocr**: whether PaddleOCR mobile models are loaded
-    - **engines.llm**: whether Ollama + qwen2.5:0.5b are reachable
-    - **supported_formats**: list of file extensions accepted by /scan-file
-    - **routing**: language-to-engine mapping summary
-    """
+    """Small operational health snapshot."""
     import requests as _requests
-    from services.detection_dispatcher import _regex_engine, _gliner_engine
+    from services.detection_dispatcher import _gliner_engine
     from services.ocr_engine import _get_ocr
 
-    # ── GLiNER ────────────────────────────────────────────────────────────────
     try:
         gliner_loaded = _gliner_engine.cache_info().currsize > 0
     except Exception:
         gliner_loaded = False
 
-    # ── OCR ───────────────────────────────────────────────────────────────────
     try:
         ocr_loaded = _get_ocr.cache_info().currsize > 0
     except Exception:
         ocr_loaded = False
 
-    # ── LLM / Ollama ──────────────────────────────────────────────────────────
-    ollama_ok   = False
-    ollama_model = None
+    ollama_ok = False
     try:
         r = _requests.get("http://localhost:11434/api/tags", timeout=2)
-        if r.status_code == 200:
-            models = [m["name"] for m in r.json().get("models", [])]
-            ollama_ok    = True
-            ollama_model = "qwen2.5:0.5b" if "qwen2.5:0.5b" in models else (models[0] if models else None)
+        ollama_ok = r.status_code == 200
     except Exception:
         pass
 
     return {
-        "service": "ok",
-        "version": "3.0.0",
-        "engines": {
-            "regex": {
-                "status": "ready",
-                "description": "Deterministic structured PII (always active)",
-            },
-            "gliner": {
-                "status": "loaded" if gliner_loaded else "idle",
-                "description": "English semantic NER — loads on first request",
-                "model": "urchade/gliner_mediumv2.1",
-            },
-            "ocr": {
-                "status": "loaded" if ocr_loaded else "idle",
-                "description": "PaddleOCR mobile — loads on startup warm-up",
-                "model": "PP-OCRv5_mobile_det + en_PP-OCRv5_mobile_rec",
-            },
-            "llm": {
-                "status": "ready" if ollama_ok else "offline",
-                "description": "Qwen 0.5B — multilingual + foreign language PII",
-                "model": ollama_model or "qwen2.5:0.5b",
-                "note": "Start Ollama to enable multilingual detection" if not ollama_ok else None,
-            },
-        },
-        "routing": {
-            "english":        "Regex + GLiNER",
-            "foreign_indic":  "Regex + Qwen 0.5B  (requires Ollama)",
-            "mixed":          "Regex + GLiNER + Qwen 0.5B",
-            "medical":        "Regex + GLiNER + Qwen 0.5B",
-        },
-        "supported_formats": [
-            "pdf", "docx", "doc", "odt", "rtf",
-            "csv", "xlsx", "xls",
-            "jpg", "jpeg", "png", "bmp", "tif", "tiff", "webp",
-            "mdb", "sql", "zip",
-        ],
+        "regex": "healthy",
+        "gliner": "healthy" if gliner_loaded else "available",
+        "qwen": "available" if ollama_ok else "unavailable",
+        "ocr": "healthy" if ocr_loaded else "available",
+        "version": "2.x",
+        "pipeline_mode": "deterministic_semantic_hybrid",
     }
 
 
 # ── POST /scan-file ───────────────────────────────────────────────────────────
 
-@router.post("/scan-file", summary="Scan a file for PII")
+# ── Production guardrails ─────────────────────────────────────────────────────
+
+MAX_FILE_SIZE_MB = 100          # Reject files larger than 100 MB
+MAX_ENTITY_COUNT = 500          # Safety cap on detected entities
+MAX_OCR_SECONDS = 120           # OCR timeout per file
+
+
+@router.post("/scan-file", summary="Scan a file for PII", response_model=ScanJobResponse)
 async def scan_file(
-    file:     UploadFile    = File(..., description="File to scan"),
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="File to scan"),
     password: Optional[str] = Form(None, description="Password for encrypted PDF/ZIP"),
-    db:       Session       = Depends(get_db),
 ):
     """
     Upload any supported file → receive document-centric PII JSON.
@@ -433,17 +725,75 @@ async def scan_file(
     **Supported formats**: PDF · DOCX · DOC · ODT · RTF · CSV · XLSX · XLS ·
     JPG · PNG · BMP · TIFF · WEBP · MDB · SQL · ZIP
 
-    **Returns**: `document`, `structured_fields`, `entities`, `ocr`,
-    `validation`, `redaction`.
-    """
-    logger.info("▷ Received: %s  (%.1f KB)",
-                file.filename, len(await file.read()) / 1024)
-    await file.seek(0)
-    file_bytes = await file.read()
+    **Returns**: `document_metadata`, `entities`, `entity_groups`,
+    `document_hints`, `ocr`, `validation_results`, `redactions`,
+    `processing_metrics`.
 
-    return await run_in_threadpool(
-        _scan_blocking, file_bytes, file.filename, password, db,
-    )
+    **Limits**: Max file size 100 MB. Max 500 entities per file.
+    """
+    # ── File size guardrail ───────────────────────────────────────────────────
+    file_bytes = await file.read()
+    file_size_mb = len(file_bytes) / (1024 * 1024)
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        return build_error_response(
+            file.filename,
+            f"File too large: {file_size_mb:.1f} MB exceeds {MAX_FILE_SIZE_MB} MB limit"
+        )
+
+    logger.info("▷ Received: %s  (%.1f KB)",
+                file.filename, file_size_mb * 1024)
+    suffix = os.path.splitext(file.filename)[1]
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(file_bytes)
+        temp_path = tmp.name
+
+    job_id = create_job(file.filename or "uploaded_file")
+    background_tasks.add_task(_run_scan_job, job_id, temp_path, file.filename, password)
+    return {"job_id": job_id, "status": "QUEUED"}
+
+
+@router.get("/scan-status/{job_id}", summary="Get scan progress and analytics", response_model=ScanStatusResponse)
+async def scan_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+
+    started_at = job.get("started_at")
+    completed_at = job.get("completed_at")
+    elapsed_seconds = 0
+    try:
+        start_dt = datetime.fromisoformat(started_at) if started_at else None
+        end_dt = datetime.fromisoformat(completed_at) if completed_at else datetime.now(start_dt.tzinfo) if start_dt else datetime.utcnow()
+        if start_dt:
+            elapsed_seconds = int((end_dt - start_dt).total_seconds())
+    except Exception:
+        elapsed_seconds = 0
+
+    return {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "current_stage": job.get("current_stage") or "",
+        "total_files": job.get("total_files", 1),
+        "processed_files": job.get("processed_files", 0),
+        "skipped_files": job.get("skipped_files", 0),
+        "failed_files": job.get("failed_files", 0),
+        "current_file": job.get("current_file"),
+        "summary": job.get("summary") or {
+            "total_entities": 0,
+            "unique_types": 0,
+            "risk_score": 0.0,
+            "risk_level": "LOW",
+        },
+        "distribution": job.get("distribution") or {},
+        "files": job.get("files", []),
+        "detailed_results": job.get("detailed_results", []),
+        "skipped": job.get("skipped", []),
+        "errors": job.get("errors", []),
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "elapsed_seconds": elapsed_seconds,
+    }
 
 
 # ── POST /redact-file ─────────────────────────────────────────────────────────
@@ -524,9 +874,10 @@ def _redact_blocking(
         content_type = ct_map.get(ext, "application/octet-stream")
 
         # Update the redaction map in the scan result
-        scan_result["redaction"] = {
+        scan_result["redactions"] = {
             "map":   result.redaction_map,
             "count": result.entity_count,
+            "redaction_verification": result.redaction_verification,
         }
 
         return {
@@ -539,6 +890,7 @@ def _redact_blocking(
                 "data_base64":  redacted_b64,
                 "entities_redacted": result.entity_count,
                 "redaction_type": redaction_type,
+                "redaction_verification": result.redaction_verification,
                 "error": result.error,
             },
         }

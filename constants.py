@@ -80,9 +80,11 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian Electoral Photo Identity Card (EPIC)",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.HIGH,
-        # Case-SENSITIVE — voter ID alpha prefix is always uppercase on the card.
-        # OCR-tolerant separators retained.
-        "regex":       r"\b[A-Z]{3}[\s.\-]*[0-9]{7}\b",
+        # EPIC/Voter ID regex ((?i) at start per Python 3.11+):
+        # Alt 1: EPIC label-gated — requires 8+ alphanumeric chars after the label
+        #         to avoid matching short OCR fragments like 'FPe'
+        # Alt 2: bare format — strict 3-UPPER-alpha + 7-digit (LDN2989101)
+        "regex":       r"(?i)(?:epic\s*(?:no|num(?:ber)?|id)?|voter\s*(?:id|no|card|number))\s*[:\-#]?\s*([A-Z]{3}[0-9]{7})|\b([A-Z]{3}[0-9]{7})\b",
     },
     {
         "id":          "driving_license",
@@ -90,11 +92,11 @@ PII_TYPES: list[PIIType] = [
         "description": "Indian state-issued driving licence number",
         "category":    Category.GOVERNMENT_ID,
         "sensitivity": Sensitivity.HIGH,
-        # Case-SENSITIVE — DL state/country codes are printed in uppercase on
-        # physical documents and preserved by OCR.  Prose words like "to",
-        # "an", "in" are lowercase and will never match without (?i).
-        # Format: 2 UPPER alpha + 2 digits + 3–15 alphanumeric chars.
-        "regex":       r"\b[A-Z]{2}[\s.\-]*[0-9]{2}[\s.\-]*[A-Z0-9]{3,15}\b",
+        # DL format: 2-letter state code + 2 digits + year (2 digits) + 7 digits
+        # e.g. MH01201712345678 or GJ0520171234567
+        # Require at least 13 chars total to avoid matching voter ID fragments (10 chars)
+        # Use strict state code prefix to reduce false positives from OCR noise
+        "regex":       r"\b(?:DL|HR|GJ|MH|KA|TN|UP|WB|AP|TS|PB|RJ|MP|BR|OR|KL|AS|UK|HP|CG|JH|GA|MN|ML|NL|TR|SK|AR|MZ|DN|DD|CH|AN|JK|LA|PY|LD)\d{2}\s?\d{4}\s?\d{7}\b",
     },
     {
         "id":          "ssn",
@@ -238,15 +240,27 @@ PII_TYPES: list[PIIType] = [
         "regex":       "",   # detected by GLiNER / Presidio
     },
     {
+        "id":          "father_name",
+        "name":        "Father's Name",
+        "description": "Father's or guardian's name on Indian ID documents",
+        "category":    Category.PERSONAL,
+        "sensitivity": Sensitivity.MEDIUM,
+        # Matches: S/O, D/O, W/O, C/O, Son of, Daughter of, Father: patterns
+        # Also PAN card bare father name: SECOND all-caps 2-4 word line after DOB
+        "regex":       r"(?im)(?:(?:S|D|W|C)\/O\.?|Son\s+of|Daughter\s+of|Wife\s+of|Care\s+of|Father(?:'?s)?(?:\s*Name)?|\bPita\b|\bF\.?Name\b)\s*[:\-]?\s*([A-Z][A-Za-z\s\.]{2,40})(?=\n|\r|$|\s{2,})|^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\r?\n[A-Z]{2,}(?:\s+[A-Z]{2,}){1,3}\r?\n([A-Z]{2,}(?:\s+[A-Z]{2,}){1,3})\b",
+    },
+    {
         "id":          "dob",
         "name":        "Date of Birth",
         "description": "Birth date",
         "category":    Category.PERSONAL,
         "sensitivity": Sensitivity.HIGH,
-        # Universal DOB: label-gated to avoid false positives on bare dates.
-        # Matches: DD/MM/YYYY, MM-DD-YYYY, YYYY.MM.DD, and label variants in any language context.
-        # Added: D.O.B., जन्मदिन, जन्म दिनांक, पैदाइश, জন্ম তারিখ, பிறந்த தேதி
-        "regex":       r"(?i)\b(?:dob|d\.?o\.?b\.?|date\s*of\s*birth|birth\s*(?:date|day)|born\s*(?:on)?|जन्म\s*तिथि|जन्मदिन|जन्म\s*दिनांक|पैदाइश|বিবাহ\s*তারিখ|\u099c\u09a8\u09cd\u09ae\s*তারিখ|تاريخ الميلاد|பிறந்த\s*தேதி)\s*[:\-]?\s*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b",
+        # Two-phase DOB regex ((?i) MUST be at the very start per Python 3.11+):
+        # Phase 1 (label-gated): DOB/Date of Birth label → high confidence
+        # Phase 2 (bare date): standalone DD/MM/YYYY / YYYY-MM-DD line on ID cards
+        #   — catches PAN/Voter/Aadhaar where DOB appears without explicit label.
+        # Indic language labels: जन्म तिथि, பிறந்த தேதி etc.
+        "regex":       r"(?im)(?:(?:dob|d\.?o\.?b\.?|date\s*of\s*birth|birth\s*(?:date|day)|born\s*(?:on)?|\u091c\u0928\u094d\u092e\s*\u0924\u093f\u0925\u093f|\u091c\u0928\u094d\u092e\u0926\u093f\u0928|\u091c\u0928\u094d\u092e\s*\u0926\u093f\u0928\u093e\u0902\u0915|\u092a\u0948\u0926\u093e\u0907\u0936|\u09ac\u09bf\u09ac\u09be\u09b9\s*\u09a4\u09be\u09b0\u09bf\u0996|\u099c\u09a8\u09cd\u09ae\s*\u09a4\u09be\u09b0\u09bf\u0916|\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u064a\u0644\u0627\u062f|\u0baa\u0bbf\u0bb1\u0ba8\u0bcd\u0ba4\s*\u0ba4\u0bc7\u0ba4\u0bbf)\s*[:\-]?\s*|^(?=\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}(?:\s|$)))(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2})\b",
     },
     {
         "id":          "address",
@@ -449,7 +463,7 @@ PII_TYPES: list[PIIType] = [
         #    Aadhaar collision avoidance: 12-digit numbers are NOT matched here
         "regex":       r"(?:"
                        r"\+\d{1,3}[\s\-.]?(?:\(0?\d{1,4}\)[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
-                       r"|(?i)(?:phone|mobile|tel|ph|mob|contact)\s*[:\-]?\s*(?:\+\d{1,3}[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
+                       r"|(?:phone|mobile|tel|ph|mob|contact)\s*[:\-]?\s*(?:\+\d{1,3}[\s\-.]?)?\d{3,5}[\s\-.]?\d{3,5}(?:[\s\-.]?\d{2,5})?"
                        r"|(?:\+91[\s\-.]?|0)?[6-9]\d{4}[\s\-.]?\d{5}(?!\d)"
                        r")(?!\d)",
     },
@@ -558,11 +572,14 @@ SEMANTIC_ONLY_PII: set[str] = {
     p["id"] for p in PII_TYPES if not p.get("regex")
 }
 
-# IDs that benefit most from LLM interpretation
+# IDs that benefit most from semantic engines (GLiNER / Qwen NER)
+# Reduced scope — removed types that added complexity without compliance value
 LLM_PRIORITY_PII: set[str] = {
-    "diagnosis", "treatment_history", "allergies", "prescription",
-    "immunization", "occupation", "educational_qualification",
-    "insurance_provider", "nationality", "weight", "height",
-    "lab_test_results", "abha_number", "annual_income", "credit_score",
-    "contact", "insurance_account_number", "medication",
+    "name", "father_name", "address", "organization",
+    "diagnosis", "treatment_history", "allergies",
 }
+
+# ── Engine Timeout Constants ──────────────────────────────────────────────────
+OCR_TIMEOUT_SECONDS: int = 120
+GLINER_TIMEOUT_SECONDS: int = 20
+QWEN_TIMEOUT_SECONDS: int = 30

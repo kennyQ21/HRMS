@@ -41,6 +41,7 @@ REPORT_COLUMNS = [
 
 DISPLAY_PII_TYPE = {
     "name": "PERSON",
+    "father_name": "FATHER_NAME",
     "organization": "ORG",
     "address": "ADDRESS",
     "pan": "PAN",
@@ -52,6 +53,7 @@ DISPLAY_PII_TYPE = {
     "dob": "DOB",
     "expiry": "EXPIRY",
     "cvv": "CVV",
+    "gender": "GENDER",
 }
 
 
@@ -194,7 +196,7 @@ def run() -> int:
         print(f"[FAIL] No image files found under {sample_dir}")
         return 1
 
-    parser = ImageParser(lang="en")
+    parser = ImageParser()
     rows: list[dict[str, str | int]] = []
     json_payloads: list[dict] = []
 

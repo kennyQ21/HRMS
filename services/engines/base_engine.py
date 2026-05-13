@@ -16,20 +16,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+# Canonical entity types — ONE source of truth
+from services.entities import PIIMatch
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PIIMatch:
-    """A single PII entity found by any detection engine."""
-    pii_type:   str           # MASTER_PIIS id — e.g. "aadhaar", "diagnosis"
-    value:      str           # matched / extracted text
-    source:     str           # engine name — "regex" | "gliner" | "llm" | "otter" | "presidio"
-    confidence: float         # 0.0 – 1.0
-    start:      int = -1      # character offset in normalised text (-1 = unknown)
-    end:        int = -1
-    context:    str = ""      # surrounding snippet for audit / LLM explanation
-    metadata:   dict = field(default_factory=dict)  # engine-specific extras
 
 
 @dataclass
@@ -54,18 +44,38 @@ class BaseEngine(ABC):
 
     Engines are designed to be stateless per call — model weights are lazily
     loaded once per process via @functools.lru_cache in each subclass.
+
+    Contract:
+      - detect() MUST return list[PIIMatch]
+      - PIIMatch.start/end MUST be in normalised text coordinates
+      - PIIMatch.source MUST be one of: "regex", "gliner", "qwen_ner"
     """
 
     name: str = "base"
+    timeout: float | None = None  # seconds; None = no timeout
 
     def run(self, text: str, **kwargs: Any) -> EngineResult:
         """
         Public entry point.  Times the run, catches exceptions so a single
         engine failure doesn't abort the whole detection pipeline.
+
+        If self.timeout is set, wraps detect() with a hard timeout.
+        On timeout: returns empty EngineResult with error="timeout".
         """
         start = time.perf_counter()
         try:
-            matches = self.detect(text, **kwargs)
+            if self.timeout is not None:
+                from services.utils.timeout import run_with_timeout
+                matches = run_with_timeout(self.detect, self.timeout, text, **kwargs)
+                if matches is None:
+                    duration = (time.perf_counter() - start) * 1000
+                    logger.warning("[%s] timed out after %.1fs", self.name.upper(), self.timeout)
+                    return EngineResult(
+                        engine=self.name, matches=[], duration_ms=duration, error="timeout"
+                    )
+            else:
+                matches = self.detect(text, **kwargs)
+
             duration = (time.perf_counter() - start) * 1000
             logger.info(
                 "[%s] detected %d entities in %.1f ms",

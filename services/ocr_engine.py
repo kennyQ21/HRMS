@@ -117,11 +117,11 @@ def _parse_result(raw) -> List[dict]:
 
         for text, score, poly in zip(texts, scores, polys):
             text = (text or "").strip()
-            if not text or score < 0.3:
+            if not text or score < 0.15:
                 continue
             # poly: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] (already int-like)
             bbox = [[int(pt[0]), int(pt[1])] for pt in poly]
-            lines.append({"text": text, "bbox": bbox})
+            lines.append({"text": text, "bbox": bbox, "confidence": float(score)})
 
     return lines
 
@@ -133,7 +133,13 @@ def run_ocr(img_paths: List[str], with_boxes: bool = False) -> List[dict]:
     Returns one entry per path:
         {"text": str, "lines": [[text, [[x,y]×4]], ...]}
     "lines" is populated only when with_boxes=True.
+
+    Each image is processed with a hard timeout (OCR_TIMEOUT_SECONDS).
+    On timeout: returns empty result for that image, continues with the rest.
     """
+    from constants import OCR_TIMEOUT_SECONDS
+    from services.utils.timeout import run_with_timeout
+
     ocr = _get_ocr()
     results = []
 
@@ -142,18 +148,39 @@ def run_ocr(img_paths: List[str], with_boxes: bool = False) -> List[dict]:
         tmp_created  = (resized_path != img_path)
 
         try:
-            raw = ocr.predict(resized_path)
+            raw = run_with_timeout(ocr.predict, OCR_TIMEOUT_SECONDS, resized_path)
+            if raw is None:
+                # OCR timed out for this image
+                logger.warning("[OCR] Timed out after %ds for %s", OCR_TIMEOUT_SECONDS, img_path)
+                results.append({"text": "", "lines": [], "error": "timeout",
+                                 "ocr_quality": {"char_count": 0, "line_count": 0,
+                                                 "avg_confidence": 0.0,
+                                                 "manual_review_required": True}})
+                continue
             lines = _parse_result(raw)
 
             text = "\n".join(ln["text"] for ln in lines)
             out_lines = [[ln["text"], ln["bbox"]] for ln in lines] if with_boxes else []
 
-            results.append({"text": text, "lines": out_lines})
-            logger.info("[OCR] %s → %d chars, %d lines", os.path.basename(img_path), len(text), len(lines))
+            # Compute OCR quality metrics for compliance escalation
+            avg_conf = sum(ln.get("confidence", 0.5) for ln in lines) / max(len(lines), 1)
+            ocr_quality = {
+                "char_count": len(text),
+                "line_count": len(lines),
+                "avg_confidence": round(avg_conf, 3),
+                "manual_review_required": len(text) < 50 or avg_conf < 0.4,
+            }
+            results.append({"text": text, "lines": out_lines, "ocr_quality": ocr_quality})
+            logger.info("[OCR] %s → %d chars, %d lines, avg_conf=%.2f, review=%s",
+                        os.path.basename(img_path), len(text), len(lines),
+                        avg_conf, ocr_quality["manual_review_required"])
 
         except Exception as exc:
             logger.error("[OCR] Failed on %s: %s", img_path, exc)
-            results.append({"text": "", "lines": [], "error": str(exc)})
+            results.append({"text": "", "lines": [], "error": str(exc),
+                             "ocr_quality": {"char_count": 0, "line_count": 0,
+                                             "avg_confidence": 0.0,
+                                             "manual_review_required": True}})
 
         finally:
             if tmp_created:

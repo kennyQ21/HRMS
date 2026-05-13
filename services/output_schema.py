@@ -1,65 +1,27 @@
 """
 services/output_schema.py
 ---------------------------
-Document-centric canonical output schema.
+Simplified document-centric output schema.
 
-Philosophy
-──────────
-The response is structured around the DOCUMENT, not the engines.
-Consumers get stable, clean, business-ready data.
-Internal extraction artifacts (engine timings, GLiNER fragments,
-OCR block lists) live in `debug` and are excluded from the default response.
+Architecture:
+  - NO per-ID-card structured_fields (brittle, maintenance-heavy)
+  - entity_groups: type -> [values] — stable, schema-light
+  - document_hints: lightweight classification signals
+  - Address consolidation preserved (high value)
+  - Entity quality filter preserved
+  - Compliance-focused, deterministic, thin output layer
 
-Schema
-──────
+Output structure:
 {
-  "status":           "success" | "error",
-
-  "document": {
-    "type":           "aadhaar_card" | "pan_card" | "passport" | "generic" | …,
-    "confidence":     0.0–1.0,
-    "filename":       "…",
-    "scan_id":        1,
-    "parser":         "image" | "pdf" | "docx" | …,
-    "page_count":     1
-  },
-
-  "structured_fields": {          ← stable API contract, doc-type specific
-    "aadhaar_number": { "value": "…", "confidence": 0.99 },
-    "address": {
-      "full": "…",
-      "city": "…",
-      "state": "…",
-      "postal_code": "…"
-    },
-    …
-  },
-
-  "entities": [                   ← evidence layer — one object per detected entity
-    {
-      "type": "aadhaar",
-      "value": "…",
-      "confidence": 1.0,
-      "source": "regex",
-      "span": { "start": 0, "end": 12 }
-    },
-    …
-  ],
-
-  "ocr": {
-    "used": true,
-    "quality": { "char_count": 868, "manual_review_required": false }
-  },
-
-  "validation": { "passed": true, "span_errors": 0 },
-
-  "redaction": { "map": {…}, "count": 0 },
-
-  "debug": {                      ← omitted unless debug=True is requested
-    "engine_timings": […],
-    "routing_rationale": […],
-    "language": "en"
-  }
+  "status":            "success",
+  "document_metadata": {},
+  "entities":          [],
+  "entity_groups":     {},
+  "document_hints":    {},
+  "ocr":               {},
+  "validation_results":{},
+  "redactions":        {},
+  "processing_metrics":{}
 }
 """
 
@@ -70,7 +32,6 @@ from typing import Any, Optional
 
 
 # ── Entity quality filter ─────────────────────────────────────────────────────
-# Entities that pass detection but are too generic/noisy for the final output.
 
 _NATIONALITY_JUNK: frozenset[str] = frozenset({
     "of india", "india", "of", "the", "government", "government of india",
@@ -90,13 +51,10 @@ def _is_clean_entity(ptype: str, value: str) -> bool:
     v = value.strip()
     if not v:
         return False
-    # Generic nationality strings that add no value
     if ptype == "nationality" and v.lower() in _NATIONALITY_JUNK:
         return False
-    # Minimum length per type
     if len(v) < _MIN_VALUE_LEN.get(ptype, 2):
         return False
-    # Address fragments that are pure uppercase noise or very short
     if ptype == "address" and _ADDRESS_NOISE_RE.match(v):
         return False
     return True
@@ -127,50 +85,38 @@ _CITY_NAMES = {
 
 
 def _consolidate_address(address_entities: list) -> dict[str, Any]:
-    """
-    Merge multiple address fragment entities into one structured address.
-    Sorts fragments by span position (where known) and joins cleanly.
-    """
+    """Merge multiple address fragment entities into one structured address."""
     clean = [
         e for e in address_entities
-        if _is_clean_entity("address", e.value)
-        and len(e.value) > 5
+        if _is_clean_entity("address", e.value) and len(e.value) > 5
     ]
     if not clean:
         return {}
 
-    # Sort by span start where available, else keep as-is
     clean.sort(key=lambda e: e.start if e.start >= 0 else 9999)
 
-    # Build full address string
     parts = []
     seen: set[str] = set()
     for e in clean:
         v = e.value.strip().rstrip(",").strip()
-        # Deduplicate
         key = re.sub(r"\s+", " ", v).lower()
         if key not in seen:
             seen.add(key)
             parts.append(v)
 
     full = ", ".join(parts)
-
-    # Try to extract structured sub-fields
     result: dict[str, Any] = {"full": full}
     full_lower = full.lower()
 
-    # Postal code
     pin = _PINCODE_RE.search(full)
     if pin:
         result["postal_code"] = pin.group(1)
 
-    # State
     for state_lower, state_proper in _STATE_CODES.items():
         if state_lower in full_lower:
             result["state"] = state_proper
             break
 
-    # City
     for city in _CITY_NAMES:
         if city in full_lower:
             result["city"] = city.title()
@@ -179,79 +125,32 @@ def _consolidate_address(address_entities: list) -> dict[str, Any]:
     return result
 
 
-# ── Document type confidence ──────────────────────────────────────────────────
+# ── Entity grouping (replaces structured_fields) ─────────────────────────────
 
-_DOC_TYPE_CONFIDENCE: dict[str, float] = {
-    "aadhaar_card":    0.97,
-    "pan_card":        0.97,
-    "passport":        0.95,
-    "voter_id":        0.95,
-    "driving_license": 0.93,
-    "medical":         0.88,
-    "financial":       0.85,
-    "hr":              0.80,
-    "id":              0.75,
-    "generic":         0.50,
-}
-
-
-# ── Structured field maps ─────────────────────────────────────────────────────
-
-_DOC_TYPE_FIELDS: dict[str, list[str]] = {
-    "aadhaar_card":    ["name", "dob", "gender", "aadhaar", "address", "pincode", "phone"],
-    "pan_card":        ["name", "dob", "pan", "gender"],
-    "passport":        ["name", "dob", "gender", "passport", "nationality", "address"],
-    "voter_id":        ["name", "dob", "gender", "voter_id", "address"],
-    "driving_license": ["name", "dob", "gender", "driving_license", "address", "blood_group"],
-    "medical":         ["name", "dob", "phone", "email", "mrn", "diagnosis",
-                        "allergies", "prescription", "blood_group", "insurance_policy"],
-    "financial":       ["name", "phone", "email", "pan", "bank_account", "ifsc", "upi"],
-    "hr":              ["name", "email", "phone", "address", "employee_id", "occupation"],
-    "id":              ["name", "dob", "aadhaar", "pan", "passport", "voter_id", "driving_license"],
-}
-
-
-def _build_structured_fields(
-    doc_type: str,
-    resolved_entities: list,
-) -> dict[str, Any]:
+def build_entity_groups(resolved_entities: list) -> dict[str, Any]:
     """
-    Build clean, consumer-facing structured field map for a document.
+    Build clean, consumer-facing entity groups from resolved entities.
 
-    Address entities are consolidated. OCR garbage is filtered.
-    Only high-confidence, semantically valid values are included.
+    Groups entities by pii_type, consolidates addresses, picks best values.
+    Replaces the old per-ID-card structured_fields which was brittle and
+    required constant maintenance for every new document type.
     """
-    wanted = _DOC_TYPE_FIELDS.get(doc_type)
-    if not wanted:
-        return {}
-
     by_type: dict[str, list] = {}
     for e in resolved_entities:
+        if not _is_clean_entity(e.pii_type, e.value):
+            continue
         by_type.setdefault(e.pii_type, []).append(e)
 
-    fields: dict[str, Any] = {}
+    groups: dict[str, Any] = {}
 
-    for ptype in wanted:
-        items = by_type.get(ptype, [])
-        if not items:
-            continue
-
+    for ptype, items in by_type.items():
         if ptype == "address":
             addr = _consolidate_address(items)
             if addr:
-                fields["address"] = addr
+                groups["address"] = addr
             continue
 
-        # Pick highest-confidence clean value
-        clean = [
-            e for e in items
-            if _is_clean_entity(ptype, e.value)
-        ]
-        if not clean:
-            continue
-        best = max(clean, key=lambda e: e.confidence)
-
-        # Rename to user-friendly keys
+        best = max(items, key=lambda e: e.confidence)
         key = {
             "aadhaar": "aadhaar_number",
             "pan":     "pan_number",
@@ -259,12 +158,40 @@ def _build_structured_fields(
             "mrn":     "medical_record_number",
         }.get(ptype, ptype)
 
-        fields[key] = {
+        groups[key] = {
             "value":      best.value,
             "confidence": round(best.confidence, 3),
         }
 
-    return fields
+    return groups
+
+
+# ── Document hints (lightweight classification) ──────────────────────────────
+
+def _build_document_hints(resolved_entities: list, content_doc=None) -> dict[str, bool]:
+    """
+    Derive lightweight document classification hints from detected entities.
+    Replaces the old doc_type-specific structured_fields.
+    """
+    types_present = {e.pii_type for e in resolved_entities}
+
+    govt_id_types = {"aadhaar", "pan", "passport", "voter_id", "driving_license",
+                     "abha_number", "ssn"}
+    medical_types = {"diagnosis", "prescription", "mrn", "allergies", "treatment_history",
+                     "blood_group", "immunization", "lab_test_results", "medication"}
+    financial_types = {"bank_account", "ifsc", "credit_card", "upi", "annual_income",
+                       "credit_score"}
+
+    ocr_used = False
+    if content_doc:
+        ocr_used = any(b.source == "ocr" for b in content_doc.blocks)
+
+    return {
+        "contains_government_id":  bool(types_present & govt_id_types),
+        "contains_medical_data":   bool(types_present & medical_types),
+        "contains_financial_data": bool(types_present & financial_types),
+        "ocr_used":                ocr_used,
+    }
 
 
 # ── OCR quality ───────────────────────────────────────────────────────────────
@@ -294,19 +221,146 @@ def build_scan_response(
     ingestion_plan,
     validation_report=None,
     redaction_map: Optional[dict] = None,
+    redaction_verification: Optional[dict] = None,
     elapsed_ms: float = 0.0,
     language: Optional[str] = None,
     debug: bool = False,
+    ocr_ms: float = 0.0,
+    detection_ms: float = 0.0,
+    resolution_ms: float = 0.0,
 ) -> dict[str, Any]:
-    """
-    Assemble the canonical document-centric JSON response.
-    """
+    """Assemble the canonical document-centric JSON response."""
     doc_type    = ingestion_plan.doc_type if ingestion_plan else "generic"
     parser_type = ingestion_plan.parser_type if ingestion_plan else "unknown"
     char_count  = len(content_doc.full_text) if content_doc else 0
     page_count  = content_doc.page_count if content_doc else 1
 
-    # ── document metadata (lightweight — file info only, no classification) ──
+    # ── document metadata ─────────────────────────────────────────────────────
+    document_metadata: dict[str, Any] = {
+        "filename":   filename,
+        "scan_id":    scan_id,
+        "parser":     parser_type,
+        "page_count": page_count,
+    }
+
+    # ── entities — clean evidence layer with audit metadata ───────────────────
+    entities: list[dict] = []
+    confidence_scores: dict[str, float] = {}
+    resolved_spans: dict[tuple[str, str], tuple[int, int]] = {}
+    for e in resolved_entities:
+        if not _is_clean_entity(e.pii_type, e.value):
+            continue
+        resolved_spans[(e.pii_type, e.value)] = (e.start, e.end)
+        entry: dict[str, Any] = {
+            "type":       e.pii_type,
+            "value":      e.value,
+            "confidence": round(e.confidence, 4),
+            "source":     e.sources[0] if e.sources else "unknown",
+        }
+        if e.start >= 0:
+            entry["span"] = {"start": e.start, "end": e.end}
+        # Audit metadata for compliance traceability
+        if hasattr(e, "metadata") and e.metadata:
+            entry["audit"] = {
+                "engine_count": e.metadata.get("engine_count", 1),
+                "grounded": e.metadata.get("grounded", True),
+            }
+        entities.append(entry)
+        confidence_scores[e.pii_type] = max(
+            confidence_scores.get(e.pii_type, 0.0), e.confidence
+        )
+    _assert_output_spans_match_resolved(entities, resolved_spans)
+
+    # ── entity groups (replaces structured_fields) ────────────────────────────
+    entity_groups = build_entity_groups(resolved_entities)
+
+    # ── document hints ────────────────────────────────────────────────────────
+    document_hints = _build_document_hints(resolved_entities, content_doc)
+
+    # ── ocr ───────────────────────────────────────────────────────────────────
+    ocr = _ocr_quality(content_doc, char_count)
+
+    # ── validation ────────────────────────────────────────────────────────────
+    if validation_report:
+        validation_results: dict[str, Any] = {
+            "passed":      validation_report.passed,
+            "span_errors": validation_report.span_errors,
+        }
+    else:
+        validation_results = {"passed": True, "span_errors": 0}
+
+    # ── redactions ────────────────────────────────────────────────────────────
+    redactions: dict[str, Any] = {
+        "map":   redaction_map or {},
+        "count": len(redaction_map) if redaction_map else 0,
+    }
+    if redaction_verification is not None:
+        redactions["redaction_verification"] = redaction_verification
+
+    # ── processing metrics ────────────────────────────────────────────────────
+    processing_metrics: dict[str, Any] = {
+        "total_ms":      round(elapsed_ms, 1),
+        "ocr_ms":        round(ocr_ms, 1),
+        "detection_ms":  round(detection_ms, 1),
+        "resolution_ms": round(resolution_ms, 1),
+        "timeouts":      sum(1 for er in engine_results if getattr(er, "error", None) == "timeout"),
+    }
+
+    # ── build response ────────────────────────────────────────────────────────
+    result: dict[str, Any] = {
+        "status":             "success",
+        "document_metadata":  document_metadata,
+        "entities":           entities,
+        "entity_groups":      entity_groups,
+        "document_hints":     document_hints,
+        "ocr":                ocr,
+        "validation_results": validation_results,
+        "redactions":         redactions,
+        "confidence_scores":  confidence_scores,
+        "processing_metrics": processing_metrics,
+    }
+
+    # ── debug (opt-in) ────────────────────────────────────────────────────────
+    if debug:
+        result["debug"] = {
+            "engine_timings": [
+                {
+                    "engine":      er.engine,
+                    "matches":     len(er.matches),
+                    "duration_ms": round(er.duration_ms, 1),
+                    "error":       er.error,
+                }
+                for er in engine_results
+            ],
+            "routing_rationale": ingestion_plan.rationale if ingestion_plan else [],
+            "language":          language or "unknown",
+        }
+
+    return result
+
+
+def _assert_output_spans_match_resolved(
+    output_entities: list[dict[str, Any]],
+    resolved_spans: dict[tuple[str, str], tuple[int, int]],
+) -> None:
+    """Output layer must copy resolver spans, never recompute them."""
+    for entity in output_entities:
+        span = entity.get("span")
+        if not span:
+            continue
+        expected = resolved_spans.get((entity["type"], entity["value"]))
+        if expected is None:
+            raise AssertionError("output entity not present in resolved entities")
+        if (span["start"], span["end"]) != expected:
+            raise AssertionError("output span diverged from resolved span")
+
+
+def build_error_response(filename: str, error: str) -> dict[str, Any]:
+    return {
+        "status":   "error",
+        "filename": filename,
+        "message":  error,
+    }
     document: dict[str, Any] = {
         "filename":   filename,
         "scan_id":    scan_id,

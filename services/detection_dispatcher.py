@@ -36,7 +36,8 @@ from functools import lru_cache
 from typing import Optional
 
 from constants import LLM_PRIORITY_PII, PII_TYPES, SEMANTIC_ONLY_PII
-from services.engines.base_engine import EngineResult, PIIMatch
+from services.entities import PIIMatch
+from services.engines.base_engine import EngineResult
 from services.entity_resolution import (
     ResolvedEntity,
     resolve,
@@ -44,7 +45,10 @@ from services.entity_resolution import (
     select_primary_from_resolved,
 )
 from services.text_normalizer import NormalisedText, normalise
-from services.language_detector import detect as detect_language, LangResult
+from services.language_detector import (
+    detect as detect_language, LangResult,
+    INDIC_SCRIPTS, ARABIC_SCRIPTS, CJK_SCRIPTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,15 +101,29 @@ def _llm_engine():
     from services.engines.llm_engine import LLMEngine
     return LLMEngine()
 
+@lru_cache(maxsize=1)
+def _qwen_ner_engine():
+    from services.engines.qwen_ner_engine import QwenNEREngine
+    return QwenNEREngine()
+
 
 # ── Persistent thread pool ────────────────────────────────────────────────────
 _ENGINE_POOL = concurrent.futures.ThreadPoolExecutor(
-    max_workers=3,
+    max_workers=2,
     thread_name_prefix="pii_engine",
 )
 
 
 class DetectionDispatcher:
+    """
+    Language-aware detection dispatcher.
+
+    Routing:
+      Latin-script only    -> Regex + GLiNER
+      Indic/Arabic only    -> Regex + Qwen NER
+      Mixed script         -> Regex + GLiNER + Qwen NER
+      Short text (<20w)    -> Regex only
+    """
 
     def dispatch(
         self,
@@ -122,53 +140,62 @@ class DetectionDispatcher:
         working_text = norm.normalised
         word_count   = len(working_text.split())
 
-        # ── Language detection ────────────────────────────────────────────────
+        # ── Language / script detection ────────────────────────────────────────
         lang = detect_language(working_text)
 
-        # ── Engine routing decision ───────────────────────────────────────────
-        is_short = word_count < 20
+        # ── Engine routing based on script ────────────────────────────────────
+        # Indian ID cards (Aadhaar, PAN, Voter) have very few words (sometimes < 15)
+        # but still need full semantic detection. Only skip NLP for truly tiny texts.
+        is_short = word_count < 6
 
-        # GLiNER runs for ALL languages — its XLM-R backbone provides
-        # multilingual token classification without hallucination risk.
-        # Benchmark proved Qwen 0.5B generative extraction is unsuitable:
-        # 64% of its outputs were hallucinated (entities not in the document).
-        # GLiNER does span extraction — every result is grounded in the text.
-        use_gliner = not is_short
+        # GLiNER: strong for Latin-script (English-dominant training)
+        # Also run for mixed-script docs (Indian IDs often have both scripts)
+        use_gliner = (
+            not is_short
+            and (lang.dominant_script == "latin"
+                 or lang.is_multilingual
+                 or lang.mixed_script_ratio > 0.10)
+        )
 
-        # LLM disabled — generative extraction is architecturally unsafe for
-        # compliance PII systems. Hallucinations are indistinguishable from
-        # real entities, and the 0.5B model introduces training-data leakage
-        # (e.g. "Alibaba Cloud", "qwen@aliyun.com" injected into output).
-        use_llm = False
+        # Qwen NER: constrained extraction for Indic/Arabic/CJK
+        # ONLY for non-Latin scripts where GLiNER is weak.
+        # Uses constrained prompts — NOT generative extraction.
+        # All outputs pass span_grounding() before acceptance.
+        use_qwen_ner = (
+            not is_short
+            and (lang.has_indic or lang.has_arabic or lang.has_cjk
+                 or lang.dominant_script in INDIC_SCRIPTS | ARABIC_SCRIPTS | CJK_SCRIPTS)
+        )
+
+        semantic_task = None
+        if use_qwen_ner:
+            semantic_task = ("qwen_ner", _qwen_ner_engine().run, {"text": working_text, "lang": lang})
+        elif use_gliner:
+            semantic_task = ("gliner", _gliner_engine().run, {"text": working_text})
 
         logger.info(
-            "[DISPATCHER] doc_type=%s words=%d | lang=%s "
-            "foreign=%s indic=%s | regex=✓ gliner=%s llm=✗",
+            "[DISPATCHER] doc_type=%s words=%d | script=%s mixed=%.2f "
+            "indic=%s arabic=%s cjk=%s | regex=✓ semantic=%s",
             doc_type, word_count,
-            lang.primary_lang, lang.has_foreign, lang.has_indic,
-            "✓" if use_gliner else "✗",
+            lang.dominant_script, lang.mixed_script_ratio,
+            lang.has_indic, lang.has_arabic, lang.has_cjk,
+            semantic_task[0] if semantic_task else "none",
         )
 
-        # ── Regex (always synchronous) ────────────────────────────────────────
-        # Pass use_nlp=True so regex knows GLiNER will handle semantic types
-        engine_results: list[EngineResult] = []
-        engine_results.append(
-            _regex_engine().run(working_text, use_nlp=True)
-        )
-
-        # ── Build parallel tasks ──────────────────────────────────────────────
-        tasks: list[tuple[str, object, dict]] = []
-
-        if use_gliner:
-            tasks.append(("gliner", _gliner_engine().run, {"text": working_text}))
+        # ── Safe parallelization: regex + at most ONE semantic engine ─────────
+        tasks: list[tuple[str, object, dict]] = [
+            ("regex", _regex_engine().run, {"text": working_text, "use_nlp": True})
+        ]
+        if semantic_task:
+            tasks.append(semantic_task)
 
         # ── Execute ───────────────────────────────────────────────────────────
         if len(tasks) > 1:
-            engine_results.extend(self._run_parallel(tasks))
-        elif len(tasks) == 1:
+            engine_results = self._run_parallel(tasks)
+        else:
             _label, fn, kwargs = tasks[0]
             text_val = kwargs.pop("text")
-            engine_results.append(fn(text_val, **kwargs))
+            engine_results = [fn(text_val, **kwargs)]
 
         # ── Entity Resolution + Span Grounding ───────────────────────────────
         resolved = resolve(engine_results, source_text=working_text)
@@ -186,8 +213,9 @@ class DetectionDispatcher:
         results:  list[EngineResult] = []
         futures:  dict = {}
         for label, fn, kwargs in tasks:
-            text_val = kwargs.pop("text")
-            futures[_ENGINE_POOL.submit(fn, text_val, **kwargs)] = label
+            call_kwargs = dict(kwargs)
+            text_val = call_kwargs.pop("text")
+            futures[_ENGINE_POOL.submit(fn, text_val, **call_kwargs)] = label
 
         for fut in concurrent.futures.as_completed(futures):
             label = futures[fut]

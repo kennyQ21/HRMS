@@ -32,7 +32,8 @@ from typing import Any, Optional
 import requests
 
 from constants import PII_TYPE_MAP
-from .base_engine import BaseEngine, PIIMatch
+from services.entities import PIIMatch
+from .base_engine import BaseEngine
 
 logger = logging.getLogger(__name__)
 

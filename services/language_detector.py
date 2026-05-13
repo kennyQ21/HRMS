@@ -1,160 +1,218 @@
 """
 services/language_detector.py
 -------------------------------
-Fast language and script detection used to route text to the right engine.
+Script-aware language detection for engine routing.
 
 Routing decision:
-  English only        → Regex + GLiNER
-  Indic/Foreign only  → Regex + Qwen 0.5B
-  Mixed               → Regex + GLiNER + Qwen 0.5B
+  Latin-script only    -> Regex + GLiNER
+  Indic/Arabic only    -> Regex + Qwen NER
+  Mixed                -> Regex + GLiNER + Qwen NER
 
-Detection strategy (two-pass):
-  1. Unicode block analysis (instant, script-level, handles noisy OCR well)
-  2. langdetect fallback (for ambiguous Latin-script foreign languages)
+Detection strategy:
+  1. Token-level script classification (Unicode block analysis)
+  2. Script distribution metrics
+  3. langdetect fallback for ambiguous Latin-script languages
+
+Output: LangResult with dominant_script, mixed_script_ratio,
+        and routing flags for engine selection.
 """
 from __future__ import annotations
 
-import re
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# ── Language groups ───────────────────────────────────────────────────────────
+# ── Script ranges for token-level classification ─────────────────────────────
 
-# Languages GLiNER handles well (Latin-script, English-dominant training)
-GLINER_LANGS: frozenset[str] = frozenset({
-    "en", "en-gb", "en-us",
-})
-
-# Languages routed to Qwen 0.5B for semantic extraction
-QWEN_LANGS: frozenset[str] = frozenset({
+SCRIPT_RANGES: list[tuple[int, int, str]] = [
     # Indic
-    "hi", "bn", "ta", "te", "kn", "ml", "gu", "pa", "mr", "or", "si",
+    (0x0900, 0x097F, "devanagari"),   # Hindi, Marathi, Sanskrit
+    (0x0980, 0x09FF, "bengali"),      # Bengali
+    (0x0A00, 0x0A7F, "gurmukhi"),     # Punjabi
+    (0x0A80, 0x0AFF, "gujarati"),     # Gujarati
+    (0x0B00, 0x0B7F, "odia"),         # Odia
+    (0x0B80, 0x0BFF, "tamil"),        # Tamil
+    (0x0C00, 0x0C7F, "telugu"),       # Telugu
+    (0x0C80, 0x0CFF, "kannada"),      # Kannada
+    (0x0D00, 0x0D7F, "malayalam"),    # Malayalam
+    # Middle East
+    (0x0600, 0x06FF, "arabic"),       # Arabic / Urdu / Farsi
+    (0x0590, 0x05FF, "hebrew"),       # Hebrew
     # East Asian
-    "zh", "zh-cn", "zh-tw", "ja", "ko",
-    # Middle East / South Asia
-    "ar", "fa", "ur", "he",
-    # Southeast Asian
-    "th", "vi", "id", "ms", "tl",
-    # European (non-English)
-    "fr", "de", "es", "pt", "it", "ru", "nl", "pl", "tr", "uk", "cs",
-    "ro", "hu", "sv", "da", "fi", "no",
-    # African
-    "sw", "am", "yo", "ha",
-})
-
-# Unicode block ranges for non-Latin scripts (fast detection without langdetect)
-_SCRIPT_BLOCKS: list[tuple[int, int, str]] = [
-    (0x0900, 0x097F, "hi"),   # Devanagari (Hindi, Marathi, Sanskrit)
-    (0x0980, 0x09FF, "bn"),   # Bengali
-    (0x0A00, 0x0A7F, "pa"),   # Gurmukhi (Punjabi)
-    (0x0A80, 0x0AFF, "gu"),   # Gujarati
-    (0x0B00, 0x0B7F, "or"),   # Odia
-    (0x0B80, 0x0BFF, "ta"),   # Tamil
-    (0x0C00, 0x0C7F, "te"),   # Telugu
-    (0x0C80, 0x0CFF, "kn"),   # Kannada
-    (0x0D00, 0x0D7F, "ml"),   # Malayalam
-    (0x0600, 0x06FF, "ar"),   # Arabic (also Urdu/Farsi)
-    (0x0590, 0x05FF, "he"),   # Hebrew
-    (0x0E00, 0x0E7F, "th"),   # Thai
-    (0x4E00, 0x9FFF, "zh"),   # CJK Unified Ideographs (Chinese/Japanese/Korean)
-    (0x3040, 0x309F, "ja"),   # Hiragana
-    (0x30A0, 0x30FF, "ja"),   # Katakana
-    (0xAC00, 0xD7AF, "ko"),   # Hangul (Korean)
-    (0x0400, 0x04FF, "ru"),   # Cyrillic (Russian/Ukrainian/etc.)
-    (0x0530, 0x058F, "hy"),   # Armenian
-    (0x10A0, 0x10FF, "ka"),   # Georgian
+    (0x4E00, 0x9FFF, "cjk"),          # Chinese/Japanese/Korean
+    (0x3040, 0x309F, "hiragana"),     # Japanese
+    (0x30A0, 0x30FF, "katakana"),     # Japanese
+    (0xAC00, 0xD7AF, "hangul"),       # Korean
+    # Other
+    (0x0400, 0x04FF, "cyrillic"),     # Russian/Ukrainian/etc.
+    (0x0E00, 0x0E7F, "thai"),         # Thai
 ]
 
-# Minimum fraction of non-ASCII chars to declare a text "foreign".
-# Raised from 0.05 to 0.12 — OCR on English docs (Aadhaar, PAN, driving
-# licences) often produces 5–10% noise chars that look like foreign script.
-# At 0.12 we only trigger Qwen when genuinely multilingual content is present.
-_FOREIGN_THRESHOLD = 0.12
+# Script groupings for routing
+INDIC_SCRIPTS: frozenset[str] = frozenset({
+    "devanagari", "bengali", "gurmukhi", "gujarati", "odia",
+    "tamil", "telugu", "kannada", "malayalam",
+})
+
+ARABIC_SCRIPTS: frozenset[str] = frozenset({"arabic", "hebrew"})
+
+CJK_SCRIPTS: frozenset[str] = frozenset({"cjk", "hiragana", "katakana", "hangul"})
+
+LATIN_SCRIPT = "latin"
+
+# ISO 639-1 mapping for backward compatibility
+_SCRIPT_TO_LANG: dict[str, str] = {
+    "devanagari": "hi", "bengali": "bn", "gurmukhi": "pa",
+    "gujarati": "gu", "odia": "or", "tamil": "ta",
+    "telugu": "te", "kannada": "kn", "malayalam": "ml",
+    "arabic": "ar", "hebrew": "he", "cjk": "zh",
+    "hiragana": "ja", "katakana": "ja", "hangul": "ko",
+    "cyrillic": "ru", "thai": "th",
+}
+
+
+def _classify_char_script(cp: int) -> str:
+    """Classify a single codepoint into a script family."""
+    for lo, hi, script in SCRIPT_RANGES:
+        if lo <= cp <= hi:
+            return script
+    return LATIN_SCRIPT
+
+
+# ── Language groups for backward compatibility ────────────────────────────────
+
+GLINER_LANGS: frozenset[str] = frozenset({"en", "en-gb", "en-us"})
+
+QWEN_LANGS: frozenset[str] = frozenset({
+    "hi", "bn", "ta", "te", "kn", "ml", "gu", "pa", "mr", "or", "si",
+    "zh", "zh-cn", "zh-tw", "ja", "ko",
+    "ar", "fa", "ur", "he",
+    "th", "vi", "id", "ms", "tl",
+    "fr", "de", "es", "pt", "it", "ru", "nl", "pl", "tr", "uk", "cs",
+})
 
 
 @dataclass
 class LangResult:
-    primary_lang: str        # ISO 639-1 code of dominant language
-    is_english: bool         # True if text is predominantly English
-    has_foreign: bool        # True if any significant non-English content
-    has_indic: bool          # True if Indic script detected
-    script_langs: list[str]  # All scripts detected via Unicode blocks
-    confidence: float        # Detection confidence
+    """Script-aware language detection result for engine routing."""
+    dominant_script:    str               # "latin" | "devanagari" | "arabic" | etc.
+    mixed_script_ratio: float             # 0.0–1.0 fraction of non-dominant script
+    has_indic:          bool              # Any Indic script detected
+    has_arabic:         bool              # Arabic/Hebrew script detected
+    has_cjk:            bool              # CJK script detected
+    is_multilingual:    bool              # Multiple scripts present
+    script_distribution: dict[str, float] # script -> fraction of tokens
+    # Backward-compatible fields
+    primary_lang:       str               # ISO 639-1 code
+    is_english:         bool
+    has_foreign:        bool
+    script_langs:       list[str]         # ISO codes for detected scripts
+    confidence:         float
 
 
 def detect(text: str) -> LangResult:
     """
-    Detect language(s) present in *text*.
+    Detect language(s) and script distribution in *text*.
 
-    Returns a LangResult with routing flags.
+    Returns a LangResult with script-level routing information.
     """
     if not text or not text.strip():
-        return LangResult("en", True, False, False, [], 1.0)
+        return LangResult(
+            dominant_script=LATIN_SCRIPT, mixed_script_ratio=0.0,
+            has_indic=False, has_arabic=False, has_cjk=False,
+            is_multilingual=False, script_distribution={},
+            primary_lang="en", is_english=True, has_foreign=False,
+            script_langs=[], confidence=1.0,
+        )
 
-    # ── Pass 1: Unicode block scan (instant, OCR-noise-tolerant) ─────────────
-    char_count  = len(text)
-    block_hits: dict[str, int] = {}
+    # ── Token-level script classification ─────────────────────────────────────
+    # Split into word tokens and classify each token by its first char
+    tokens = re.findall(r'\S+', text)
+    if not tokens:
+        return LangResult(
+            dominant_script=LATIN_SCRIPT, mixed_script_ratio=0.0,
+            has_indic=False, has_arabic=False, has_cjk=False,
+            is_multilingual=False, script_distribution={},
+            primary_lang="en", is_english=True, has_foreign=False,
+            script_langs=[], confidence=1.0,
+        )
 
-    for ch in text:
-        cp = ord(ch)
-        for lo, hi, lang in _SCRIPT_BLOCKS:
-            if lo <= cp <= hi:
-                block_hits[lang] = block_hits.get(lang, 0) + 1
+    script_counts: dict[str, int] = {}
+    for token in tokens:
+        # Classify by first non-punctuation character
+        for ch in token:
+            if ch.isalpha():
+                script = _classify_char_script(ord(ch))
+                script_counts[script] = script_counts.get(script, 0) + 1
                 break
 
-    total_foreign_chars = sum(block_hits.values())
-    foreign_ratio = total_foreign_chars / max(char_count, 1)
+    total_tokens = max(sum(script_counts.values()), 1)
+    script_distribution = {
+        s: round(c / total_tokens, 3)
+        for s, c in sorted(script_counts.items(), key=lambda x: -x[1])
+    }
 
-    script_langs = [
-        lang for lang, cnt in sorted(block_hits.items(), key=lambda x: -x[1])
-        if cnt / max(char_count, 1) >= 0.02    # at least 2% of chars
-    ]
+    # ── Determine dominant script ─────────────────────────────────────────────
+    dominant_script = max(script_counts, key=script_counts.get) if script_counts else LATIN_SCRIPT
+    dominant_ratio = script_counts.get(dominant_script, 0) / total_tokens
 
-    has_indic = any(lang in {"hi","bn","ta","te","kn","ml","gu","pa","mr","or"} for lang in script_langs)
-    has_foreign_script = foreign_ratio >= _FOREIGN_THRESHOLD
+    # Mixed script ratio: fraction of tokens NOT in the dominant script
+    mixed_script_ratio = round(1.0 - dominant_ratio, 3)
 
-    # ── Pass 2: langdetect for Latin-script foreign languages ─────────────────
-    detected_lang = "en"
-    langdetect_conf = 0.0
-    if not has_foreign_script:
+    # ── Script family flags ───────────────────────────────────────────────────
+    detected_scripts = set(script_counts.keys())
+    has_indic   = bool(detected_scripts & INDIC_SCRIPTS)
+    has_arabic  = bool(detected_scripts & ARABIC_SCRIPTS)
+    has_cjk     = bool(detected_scripts & CJK_SCRIPTS)
+    is_multilingual = len(detected_scripts) > 1
+
+    # ── Backward-compatible fields ────────────────────────────────────────────
+    # Primary language from dominant script
+    primary_lang = _SCRIPT_TO_LANG.get(dominant_script, "en")
+
+    # langdetect fallback for Latin-script foreign languages
+    if dominant_script == LATIN_SCRIPT and mixed_script_ratio < 0.15:
         try:
             from langdetect import detect_langs
-            results = detect_langs(text[:2000])   # limit for speed
-            if results:
-                top = results[0]
-                detected_lang    = top.lang
-                langdetect_conf  = top.prob
+            results = detect_langs(text[:2000])
+            if results and results[0].prob > 0.80:
+                primary_lang = results[0].lang
         except Exception:
             pass
 
-    # ── Determine primary language ────────────────────────────────────────────
-    if script_langs:
-        primary_lang = script_langs[0]
-    elif detected_lang != "en" and langdetect_conf > 0.80:
-        primary_lang = detected_lang
-    else:
-        primary_lang = "en"
-
     is_english = (
-        primary_lang == "en"
-        and not has_foreign_script
-        and detected_lang in ("en", "unknown")
+        dominant_script == LATIN_SCRIPT
+        and primary_lang in ("en", "en-gb", "en-us")
+        and mixed_script_ratio < 0.15
     )
 
-    confidence = langdetect_conf if not has_foreign_script else min(foreign_ratio * 2, 1.0)
+    # Script langs for backward compat
+    script_langs = [
+        _SCRIPT_TO_LANG.get(s, s)
+        for s in sorted(script_counts, key=script_counts.get, reverse=True)
+        if script_counts[s] / total_tokens >= 0.02
+    ]
+
+    confidence = min(dominant_ratio * 1.5, 1.0)
 
     logger.debug(
-        "[LANG] primary=%s english=%s foreign_ratio=%.2f scripts=%s",
-        primary_lang, is_english, foreign_ratio, script_langs,
+        "[LANG] dominant=%s mixed=%.2f indic=%s arabic=%s cjk=%s multi=%s",
+        dominant_script, mixed_script_ratio, has_indic, has_arabic, has_cjk, is_multilingual,
     )
 
     return LangResult(
+        dominant_script=dominant_script,
+        mixed_script_ratio=mixed_script_ratio,
+        has_indic=has_indic,
+        has_arabic=has_arabic,
+        has_cjk=has_cjk,
+        is_multilingual=is_multilingual,
+        script_distribution=script_distribution,
         primary_lang=primary_lang,
         is_english=is_english,
         has_foreign=not is_english,
-        has_indic=has_indic,
         script_langs=script_langs,
         confidence=round(confidence, 3),
     )
