@@ -7,7 +7,6 @@ python-multipart>=0.0.9    # required for UploadFile / Form
 sqlalchemy>=2.0.35
 alembic>=1.13.0
 pymysql>=1.1.1
-pymssql>=2.3.1
 pymongo>=4.11.1
 psycopg[binary]>=3.2.6
 psycopg2-binary>=2.9.10
@@ -15,11 +14,6 @@ pyodbc>=5.2.0
 
 # ── Auth / HTTP ───────────────────────────────────────────────────────────────
 requests>=2.32.3
-google-auth-oauthlib>=1.2.1
-google-api-python-client>=2.162.0
-
-# ── Email ─────────────────────────────────────────────────────────────────────
-imaplib2>=3.6
 
 # ── Data / File Parsing ───────────────────────────────────────────────────────
 pandas>=2.2.3
@@ -27,11 +21,10 @@ openpyxl>=3.1.5
 python-docx>=1.1.2
 pypdf2>=3.0.1
 pycryptodome>=3.22.0
-azure-ai-documentintelligence>=1.0.0  # OCR + layout via Azure Document Intelligence
+# azure-ai-documentintelligence>=1.0.0  # disabled — PaddleOCR is the sole OCR engine
 numpy>=1.26.4,<2.0.0
 pillow>=10.0.0
 pdf2image>=1.17.0
-pypandoc>=1.15
 python-pptx>=1.0.2
 
 # ── Archive support ───────────────────────────────────────────────────────────
@@ -47,15 +40,15 @@ python-dotenv>=1.0.1
 sqlparse>=0.5.0
 chardet>=5.2.0
 py>=1.11.0
-
-# ── PII detection — multi-engine hybrid pipeline ─────────────────────────────
-presidio-analyzer>=2.2.355
-spacy>=3.7.0,<4.0.0
 tldextract>=5.1.0
-en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
-# GLiNER — zero-shot semantic NER engine
+# ── PII detection — GLiNER zero-shot semantic NER ─────────────────────────────
 gliner>=0.2.0
 
-# torch is a GLiNER transitive dependency; pin to avoid CUDA-only wheels
-torch>=2.0.0
+# torch CPU-only — installed separately in Dockerfile with PyTorch CPU index
+
+# ── OCR engine — PaddleOCR + CPU-only PaddlePaddle backend ───────────────────
+# paddlepaddle 3.3.1 has no ARM64 Linux wheel; floor at 3.0.0 so pip picks the
+# best available wheel for the build platform (3.2.2 on aarch64, 3.3.1 on x86_64)
+paddlepaddle>=3.0.0
+paddleocr>=3.0.0
