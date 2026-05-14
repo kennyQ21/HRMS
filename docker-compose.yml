@@ -1,20 +1,13 @@
 services:
   vault_migration_service:
-    build: .
+    build:
+      context: .
+      args:
+        HF_TOKEN: ${HF_TOKEN:-}
     ports:
       - "5000:5000"
-    volumes:
-      - .:/app
-    environment:
-      FLASK_ENV: production
-      SECRET_KEY: "secret-key"  
-      POSTGRES_DB: migration_db
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: yMnE1i6Z27RG6JCah
-      DATABASE_URL: postgres.chsgq28yetgt.ap-south-1.rds.amazonaws.com
-      DB_PORT: 5432
-      DOCUMENTINTELLIGENCE_ENDPOINT: ${DOCUMENTINTELLIGENCE_ENDPOINT}
-      DOCUMENTINTELLIGENCE_API_KEY: ${DOCUMENTINTELLIGENCE_API_KEY}
+    env_file:
+      - .env
     labels:
       - "traefik.enable=true"
       

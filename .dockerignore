@@ -1,0 +1,32 @@
+# Runtime / generated
+venv/
+__pycache__/
+*.py[cod]
+*.so
+*.db
+*.db-journal
+uploads/
+debug/
+results/
+output.json
+sample/output/
+
+# Git
+.git/
+.gitignore
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Tests & docs
+tests/
+docs/
+
+# Local compose override
+docker-compose.local.yml

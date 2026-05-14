@@ -1,0 +1,17 @@
+services:
+  vault_migration_service:
+    image: vault-migration-service:latest
+    ports:
+      - "5001:5000"
+    environment:
+      FLASK_ENV: development
+      SECRET_KEY: "local-dev-secret"
+      JWT_SECRET: "local-dev-jwt-secret"
+      JWT_REQUIRED_ORG: "Patronus1"
+      DISABLE_PADDLE_OCR: "true"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/status')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
