@@ -1,10 +1,12 @@
+import os
+
 import jwt
 from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-_SECRET = "super_secret_key"
+_SECRET = os.environ["JWT_SECRET"]
 _ALGORITHM = "HS256"
-_REQUIRED_ORG = "Patronus1"
+_REQUIRED_ORG = os.getenv("JWT_REQUIRED_ORG", "Patronus1")
 
 _bearer = HTTPBearer(auto_error=False)
 

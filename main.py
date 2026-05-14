@@ -6,6 +6,7 @@ Single endpoint:  POST /scan-file
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from contextlib import asynccontextmanager
 
@@ -151,7 +152,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_warm_ocr, daemon=True, name="ocr-warmup").start()
 
     logger.info("  Endpoint    →  POST /scan-file")
-    logger.info("  Docs        →  http://localhost:8000/docs")
+    logger.info("  Docs        →  http://localhost:5000/docs")
     logger.info("═" * 60)
 
     yield
@@ -171,9 +172,11 @@ app = FastAPI(
     dependencies=[Depends(verify_token)],
 )
 
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "*").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -44,6 +44,12 @@ _MAX_PX = 2000
 @lru_cache(maxsize=1)
 def _get_ocr():
     """Load PaddleOCR once per process and cache it."""
+    if os.getenv("DISABLE_PADDLE_OCR", "").lower() == "true":
+        raise RuntimeError(
+            "PaddleOCR disabled via DISABLE_PADDLE_OCR=true "
+            "(ARM64 Docker — use Azure Document Intelligence for OCR)"
+        )
+
     from paddleocr import PaddleOCR  # heavy import — deferred intentionally
 
     logger.info("[OCR] Loading PaddleOCR mobile models (first call only)…")
